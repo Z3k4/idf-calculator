@@ -17,6 +17,7 @@ from .cache import Cache, MemoryCache
 from .models import Itinerary, ItinerarySection, Place, TransitLine
 from .prim import PrimConfigError, PrimError
 from .storage import PlaceSearchStore
+from .usage import UsageTracker, nullcall
 
 PARIS = ZoneInfo("Europe/Paris")
 NAVITIA_DT = "%Y%m%dT%H%M%S"
@@ -48,6 +49,7 @@ class NavitiaClient:
         places_ttl: float = 86400.0,
         journeys_ttl: float = 60.0,
         place_store: PlaceSearchStore | None = None,
+        usage: UsageTracker | None = None,
     ):
         self.http = http
         self.api_key = api_key
@@ -57,6 +59,7 @@ class NavitiaClient:
         self.journeys_ttl = journeys_ttl
         # Cache persistant (SQLite) des recherches d'adresses, consulté après le cache mémoire
         self.place_store = place_store
+        self.usage = usage
 
     async def _get(
         self, path: str, params: list[tuple[str, str]], cache_key: str | None = None, ttl: float = 0
@@ -64,18 +67,22 @@ class NavitiaClient:
         if cache_key:
             cached = await self.cache.get(cache_key)
             if cached is not None:
+                await self._hit()
                 return cached
         if not self.api_key:
             raise PrimConfigError("Clé API PRIM manquante (variable IDF_PRIM_API_KEY)")
 
-        try:
-            resp = await self.http.get(
-                f"{self.base_url}/{path}",
-                params=params,
-                headers={"apikey": self.api_key, "Accept": "application/json"},
-            )
-        except httpx.HTTPError as exc:
-            raise NavitiaError(f"Calculateur IDFM injoignable : {exc}") from exc
+        tracker = self.usage.track("navitia", path) if self.usage else nullcall()
+        async with tracker as call:
+            try:
+                resp = await self.http.get(
+                    f"{self.base_url}/{path}",
+                    params=params,
+                    headers={"apikey": self.api_key, "Accept": "application/json"},
+                )
+            except httpx.HTTPError as exc:
+                raise NavitiaError(f"Calculateur IDFM injoignable : {exc}") from exc
+            call.status = resp.status_code
 
         try:
             data = resp.json()
@@ -96,6 +103,10 @@ class NavitiaClient:
             await self.cache.set(cache_key, data, ttl)
         return data
 
+    async def _hit(self) -> None:
+        if self.usage:
+            await self.usage.record_cache_hit("navitia")
+
     async def places(self, query: str, count: int = 8) -> list[Place]:
         """Recherche de lieux : cache mémoire, puis cache SQLite, puis appel IDFM."""
         q = normalize_query(query)
@@ -106,6 +117,7 @@ class NavitiaClient:
             if cached is not None:
                 await self.cache.set(f"navitia:places:{key}", cached, self.places_ttl)
         if cached is not None:
+            await self._hit()
             return [Place(**p) for p in cached]
 
         params = [("q", q), ("count", str(count))] + [("type[]", t) for t in PLACE_TYPES]

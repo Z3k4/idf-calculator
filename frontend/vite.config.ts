@@ -13,6 +13,8 @@ export default defineConfig({
       '/journeys': API,
       '/places': API,
       '/itineraries': API,
+      '/usage': API,
+      '/home': API,
     },
   },
 });

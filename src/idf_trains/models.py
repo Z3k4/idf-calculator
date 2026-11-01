@@ -185,3 +185,80 @@ class SavedItinerary(BaseModel):
     origin: Place
     destination: Place
     created_at: datetime
+
+
+# --- Suivi de consommation des API IDFM --------------------------------------------------
+
+
+class ApiUsageToday(BaseModel):
+    api: str
+    label: str
+    calls: int
+    errors: int
+    # Requêtes servies par le cache, sans appel à IDFM
+    cache_hits: int
+    quota: int | None = None
+    remaining: int | None = None
+
+
+class UsageDay(BaseModel):
+    day: str
+    api: str
+    calls: int
+    errors: int
+    cache_hits: int
+
+
+class UsageHour(BaseModel):
+    hour: int
+    api: str
+    calls: int
+
+
+class UsageEndpoint(BaseModel):
+    api: str
+    endpoint: str
+    calls: int
+    errors: int
+    avg_ms: int
+
+
+class UsageCall(BaseModel):
+    at: datetime
+    api: str
+    endpoint: str
+    status: int
+    duration_ms: int
+
+
+class UsageResponse(BaseModel):
+    day: str
+    timezone: str = "Europe/Paris"
+    apis: list[ApiUsageToday]
+    daily: list[UsageDay]
+    hourly: list[UsageHour]
+    endpoints: list[UsageEndpoint]
+    recent: list[UsageCall]
+
+
+# --- Page d'accueil ------------------------------------------------------------------------
+
+
+class HomeItemRef(BaseModel):
+    kind: Literal["journey", "itinerary"]
+    id: int
+
+
+class HomeUpdate(BaseModel):
+    items: list[HomeItemRef] = Field(..., max_length=20)
+
+
+class HomeItem(BaseModel):
+    kind: Literal["journey", "itinerary"]
+    id: int
+    journey: SavedJourney | None = None
+    itinerary: SavedItinerary | None = None
+
+
+class HomeResponse(BaseModel):
+    items: list[HomeItem]

@@ -9,6 +9,10 @@
   --accent: #2563eb;
   --accent-soft: #e8efff;
   --on-accent: #ffffff;
+  /* Séries des graphiques (validées daltonisme et contraste sur ce fond) */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --grid: #e5e7eb;
   --ok: #047857;
   --ok-soft: #d1fae5;
   --warn: #b45309;
@@ -32,6 +36,9 @@
     --accent: #58a6ff;
     --accent-soft: #14284a;
     --on-accent: #0d1117;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --grid: #2a313c;
     --ok: #3fb950;
     --ok-soft: #12301d;
     --warn: #e3b341;

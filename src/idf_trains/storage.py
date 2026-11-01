@@ -251,3 +251,138 @@ class PlaceSearchStore(SQLiteStore):
 
 def _now() -> float:
     return datetime.now(timezone.utc).timestamp()
+
+
+# --- Suivi de la consommation des API IDFM ----------------------------------------------
+
+USAGE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS api_calls (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL NOT NULL,     -- horodatage Unix
+    day         TEXT NOT NULL,     -- date à Paris (AAAA-MM-JJ), jour de remise à zéro des quotas
+    hour        INTEGER NOT NULL,  -- heure à Paris
+    api         TEXT NOT NULL,     -- realtime | navitia
+    endpoint    TEXT NOT NULL,     -- stop-monitoring | places | journeys
+    status      INTEGER NOT NULL,  -- code HTTP (0 = erreur réseau)
+    duration_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS api_calls_day ON api_calls (day);
+CREATE TABLE IF NOT EXISTS cache_hits (
+    day    TEXT NOT NULL,
+    api    TEXT NOT NULL,
+    count  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, api)
+);
+"""
+
+
+class UsageStore(SQLiteStore):
+    """Journal des appels sortants vers IDFM et des requêtes évitées grâce au cache."""
+
+    SCHEMA = USAGE_SCHEMA
+
+    def record_call(self, api: str, endpoint: str, status: int, duration_ms: int, at: datetime) -> None:
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO api_calls (ts, day, hour, api, endpoint, status, duration_ms) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (at.timestamp(), at.date().isoformat(), at.hour, api, endpoint, status, duration_ms),
+            )
+
+    def record_cache_hit(self, api: str, at: datetime) -> None:
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO cache_hits (day, api, count) VALUES (?, ?, 1) "
+                "ON CONFLICT(day, api) DO UPDATE SET count = count + 1",
+                (at.date().isoformat(), api),
+            )
+
+    def daily(self, since: str) -> list[dict]:
+        """Par jour et par API : appels, erreurs, requêtes servies par le cache."""
+        with self._connect() as db:
+            calls = db.execute(
+                "SELECT day, api, COUNT(*) AS calls, SUM(status <> 200) AS errors "
+                "FROM api_calls WHERE day >= ? GROUP BY day, api",
+                (since,),
+            ).fetchall()
+            hits = db.execute(
+                "SELECT day, api, count FROM cache_hits WHERE day >= ?", (since,)
+            ).fetchall()
+        rows: dict[tuple, dict] = {}
+        for r in calls:
+            rows[(r["day"], r["api"])] = {
+                "day": r["day"], "api": r["api"], "calls": r["calls"], "errors": r["errors"] or 0, "cache_hits": 0
+            }
+        for r in hits:
+            row = rows.setdefault(
+                (r["day"], r["api"]), {"day": r["day"], "api": r["api"], "calls": 0, "errors": 0, "cache_hits": 0}
+            )
+            row["cache_hits"] = r["count"]
+        return sorted(rows.values(), key=lambda r: (r["day"], r["api"]))
+
+    def hourly(self, day: str) -> list[dict]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT hour, api, COUNT(*) AS calls FROM api_calls WHERE day = ? GROUP BY hour, api",
+                (day,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def by_endpoint(self, day: str) -> list[dict]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT api, endpoint, COUNT(*) AS calls, SUM(status <> 200) AS errors, "
+                "CAST(AVG(duration_ms) AS INTEGER) AS avg_ms "
+                "FROM api_calls WHERE day = ? GROUP BY api, endpoint ORDER BY calls DESC",
+                (day,),
+            ).fetchall()
+        return [dict(r) | {"errors": r["errors"] or 0} for r in rows]
+
+    def recent(self, limit: int = 30) -> list[dict]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT ts, api, endpoint, status, duration_ms FROM api_calls ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def purge(self, before_day: str) -> None:
+        with self._connect() as db:
+            db.execute("DELETE FROM api_calls WHERE day < ?", (before_day,))
+            db.execute("DELETE FROM cache_hits WHERE day < ?", (before_day,))
+
+
+# --- Page d'accueil : éléments choisis et leur ordre -------------------------------------
+
+HOME_SCHEMA = """
+CREATE TABLE IF NOT EXISTS home_items (
+    kind     TEXT NOT NULL CHECK (kind IN ('journey', 'itinerary')),
+    ref_id   INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    PRIMARY KEY (kind, ref_id)
+);
+"""
+
+
+class HomeStore(SQLiteStore):
+    """Trajets et itinéraires sauvegardés affichés sur la page d'accueil, dans l'ordre choisi."""
+
+    SCHEMA = HOME_SCHEMA
+
+    def list(self) -> list[tuple[str, int]]:
+        with self._connect() as db:
+            rows = db.execute("SELECT kind, ref_id FROM home_items ORDER BY position").fetchall()
+        return [(r["kind"], r["ref_id"]) for r in rows]
+
+    def replace(self, items: list[tuple[str, int]]) -> None:
+        """Remplace toute la sélection (dans une seule transaction)."""
+        with self._connect() as db:
+            db.execute("DELETE FROM home_items")
+            db.executemany(
+                "INSERT INTO home_items (kind, ref_id, position) VALUES (?, ?, ?)",
+                [(kind, ref_id, pos) for pos, (kind, ref_id) in enumerate(items)],
+            )
+
+    def remove(self, kind: str, ref_id: int) -> None:
+        with self._connect() as db:
+            db.execute("DELETE FROM home_items WHERE kind = ? AND ref_id = ?", (kind, ref_id))

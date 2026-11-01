@@ -26,10 +26,12 @@ lien partageable (`#/gare/45102`), thème clair/sombre automatique.
 
 Pages :
 
-- `#/` : recherche d'une gare et prochains départs ;
+- `#/` : **accueil personnalisable** : les trajets et itinéraires sauvegardés choisis (bouton « Personnaliser » : cocher, ordonner), avec les prochains trains directs en direct et le meilleur itinéraire calculé à l'ouverture ;
+- `#/departs` : recherche d'une gare et prochains départs ;
 - `#/itineraire` : itinéraire entre deux adresses (autocomplétion, adresses récentes, « Ma position », partir/arriver à, sauvegarde) ;
 - `#/itineraires/{id}` : itinéraire sauvegardé (calcul à la demande, renommer, supprimer, itinéraire retour) ;
 - `#/trajet?from=…&to=…` : choix d'une gare de départ et d'arrivée, prochains trains directs, sauvegarde ;
+- `#/conso` : consommation des API IDFM (quotas, historique, cache, derniers appels) ;
 - `#/trajets` : itinéraires et trajets directs sauvegardés (avec le prochain train pour les trajets directs) ;
 - `#/trajets/{id}` : détail d'un trajet (renommer, supprimer, trajet retour).
 
@@ -68,6 +70,9 @@ uv run uvicorn idf_trains.main:app            # -> http://localhost:8000
 | POST | `/itineraries/saved` | Sauvegarder `{"origin": <lieu>, "destination": <lieu>, "name"?}` |
 | GET / PATCH / DELETE | `/itineraries/saved/{id}` | Détail / renommer `{"name"}` / supprimer |
 | GET | `/itineraries/saved/{id}/next` | Calculer un itinéraire sauvegardé (`datetime`, `represents`, `count`) |
+| GET | `/usage?days=30` | Consommation des API IDFM : appels, quotas, cache, erreurs |
+| GET | `/home` | Éléments de la page d'accueil (trajets et itinéraires choisis, dans l'ordre) |
+| PUT | `/home` | Choisir les éléments de l'accueil `{"items": [{"kind": "journey" \| "itinerary", "id"}]}` |
 | GET | `/health` | Healthcheck |
 
 Exemple : `GET /stations/45102/departures?line=A`
@@ -177,6 +182,24 @@ fois (409). « Ma position » (type `position`) est refusée (422), car elle cha
 ```
 
 Accents, ponctuation et mots courants (« gare », « de », « la »…) sont ignorés ; « st »/« ste » valent « saint »/« sainte ».
+
+## Suivi de la consommation des API IDFM
+
+Chaque appel envoyé à Île-de-France Mobilités est enregistré dans la base SQLite (table `api_calls` : API, service,
+code HTTP, durée), ainsi que le nombre de requêtes servies par le cache sans appel (table `cache_hits`).
+Les jours sont comptés à l'heure de Paris, comme la remise à zéro des quotas. L'historique est conservé 90 jours
+(`IDF_USAGE_RETENTION_DAYS`).
+
+`GET /usage?days=30` renvoie, pour aujourd'hui et par API, les appels, les erreurs, les requêtes évitées par le cache
+et le quota restant. S'y ajoutent l'historique par jour, la répartition par heure, le détail par service et les
+derniers appels. La page **Conso** du frontend (`#/conso`) l'affiche avec des graphiques, rafraîchis toutes les 30 s.
+
+| Variable | Défaut | Description |
+|---|---|---|
+| `IDF_QUOTA_NAVITIA` | `1000` | Quota journalier du calculateur d'itinéraires (jetons PRIM récents) |
+| `IDF_QUOTA_REALTIME` | *(aucun)* | Quota journalier de l'API temps réel : à renseigner selon votre abonnement PRIM |
+
+Les appels sont comptés **par ce serveur** : si la même clé API est utilisée ailleurs, ces appels-là n'apparaissent pas.
 
 ## Cache
 

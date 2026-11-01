@@ -9,6 +9,8 @@
   import SavedItineraryDetail from './pages/SavedItineraryDetail.svelte';
   import SavedJourneyDetail from './pages/SavedJourneyDetail.svelte';
   import SavedJourneys from './pages/SavedJourneys.svelte';
+  import Usage from './pages/Usage.svelte';
+  import Home from './pages/Home.svelte';
 
   const RECENT_KEY = 'idf-trains:recent';
   const MAX_RECENT = 6;
@@ -35,20 +37,25 @@
   }
 
   // Routage par hash (liens partageables, bouton retour du navigateur) :
-  //   #/  ·  #/gare/45102  ·  #/trajet?from=…&to=…  ·  #/trajets  ·  #/trajets/3
+  //   #/ (accueil)  ·  #/departs  ·  #/gare/45102  ·  #/itineraire?…  ·  #/trajet?from=…&to=…
+  //   #/trajets  ·  #/trajets/3  ·  #/itineraires/2  ·  #/conso
   type Page =
     | { name: 'home' }
+    | { name: 'departures' }
     | { name: 'planner'; from: string | null; to: string | null }
     | { name: 'itinerary'; from: Place | null; to: Place | null; mode: 'now' | 'departure' | 'arrival'; when: string | null }
     | { name: 'journeys' }
     | { name: 'journey'; id: number }
-    | { name: 'savedItinerary'; id: number };
+    | { name: 'savedItinerary'; id: number }
+    | { name: 'usage' };
 
   let page = $state<Page>({ name: 'home' });
 
   function parseHash(): Page {
     const [path, query = ''] = location.hash.replace(/^#/, '').split('?');
     const params = new URLSearchParams(query);
+    if (path === '' || path === '/') return { name: 'home' };
+    if (path === '/departs' || path.startsWith('/gare/')) return { name: 'departures' };
     if (path === '/trajet') return { name: 'planner', from: params.get('from'), to: params.get('to') };
     if (path === '/itineraire') {
       const mode = params.get('mode');
@@ -61,6 +68,7 @@
       };
     }
     if (path === '/trajets') return { name: 'journeys' };
+    if (path === '/conso') return { name: 'usage' };
     const m = path.match(/^\/trajets\/(\d+)$/);
     if (m) return { name: 'journey', id: Number(m[1]) };
     const mi = path.match(/^\/itineraires\/(\d+)$/);
@@ -110,9 +118,9 @@
   });
 
   $effect(() => {
-    const titles: Record<string, string> = { planner: 'Trajet direct', journeys: 'Mes trajets', itinerary: 'Itinéraire' };
+    const titles: Record<string, string> = { planner: 'Trajet direct', journeys: 'Mes trajets', itinerary: 'Itinéraire', usage: 'Consommation API' };
     if (page.name === 'journey' || page.name === 'savedItinerary') return; // titre fixé par la page
-    const title = page.name === 'home' ? station?.name : titles[page.name];
+    const title = page.name === 'departures' ? (station?.name ?? 'Départs') : page.name === 'home' ? null : titles[page.name];
     document.title = title ? `${title} · Prochains trains` : 'Prochains trains IDF';
   });
 </script>
@@ -125,16 +133,21 @@
         <span>Prochains trains <em>IDF</em></span>
       </a>
       <nav aria-label="Navigation principale">
-        <a href="#/" class:active={page.name === 'home'}>Départs</a>
+        <a href="#/" class:active={page.name === 'home'}>Accueil</a>
+        <a href="#/departs" class:active={page.name === 'departures'}>Départs</a>
         <a href="#/itineraire" class:active={page.name === 'itinerary'}>Itinéraire</a>
-        <a href="#/trajet" class:active={page.name === 'planner'}>Trajet</a>
-        <a href="#/trajets" class:active={page.name === 'journeys' || page.name === 'journey' || page.name === 'savedItinerary'}>Mes trajets</a>
+        <a href="#/trajets" class:active={['journeys', 'journey', 'savedItinerary', 'planner'].includes(page.name)}>Mes trajets</a>
+        <a href="#/conso" class:active={page.name === 'usage'}>Conso</a>
       </nav>
     </div>
   </header>
 
   <main>
-  {#if page.name === 'itinerary'}
+  {#if page.name === 'home'}
+    <Home />
+  {:else if page.name === 'usage'}
+    <Usage />
+  {:else if page.name === 'itinerary'}
     <ItineraryPlanner initial={page} />
   {:else if page.name === 'planner'}
     <JourneyPlanner fromId={page.from} toId={page.to} />
@@ -183,6 +196,7 @@
 
   <footer class="bottom">
     Données temps réel : <a href="https://prim.iledefrance-mobilites.fr" target="_blank" rel="noreferrer">PRIM – Île-de-France Mobilités</a>
+    · <a href="#/conso">Consommation API</a>
   </footer>
 </div>
 
@@ -223,6 +237,12 @@
   }
   nav a:hover {
     color: #fff;
+  }
+  @media (max-width: 420px) {
+    nav a {
+      padding: 0.4rem 0.45rem;
+      font-size: 0.85rem;
+    }
   }
   nav a.active {
     color: #fff;

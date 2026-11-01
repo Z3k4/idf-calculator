@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
@@ -14,8 +14,17 @@ from .models import (
     ItinerariesResponse,
     JourneyNextResponse,
     Place,
+    ApiUsageToday,
+    HomeItem,
+    HomeResponse,
+    HomeUpdate,
     SavedItinerary,
     SavedItineraryCreate,
+    UsageCall,
+    UsageDay,
+    UsageEndpoint,
+    UsageHour,
+    UsageResponse,
     SavedJourney,
     SavedJourneyCreate,
     SavedJourneyUpdate,
@@ -35,12 +44,15 @@ from .stations import StationRepository
 from .storage import (
     DuplicateItineraryError,
     DuplicateJourneyError,
+    HomeStore,
     ItineraryRow,
     ItineraryStore,
     JourneyRow,
     JourneyStore,
     PlaceSearchStore,
+    UsageStore,
 )
+from .usage import APIS, PARIS, UsageTracker, now_paris
 
 
 @asynccontextmanager
@@ -51,8 +63,14 @@ async def lifespan(app: FastAPI):
             app.state.repo = StationRepository.from_file(settings.stations_file)
             app.state.store = JourneyStore(settings.db_path)
             app.state.itinerary_store = ItineraryStore(settings.db_path)
+            app.state.home_store = HomeStore(settings.db_path)
             place_store = PlaceSearchStore(settings.db_path, max_age=settings.places_db_ttl)
             place_store.purge()
+            app.state.usage_store = UsageStore(settings.db_path)
+            app.state.usage_store.purge(
+                (now_paris() - timedelta(days=settings.usage_retention_days)).date().isoformat()
+            )
+            usage = UsageTracker(app.state.usage_store)
             app.state.prim = PrimClient(
                 http,
                 settings.prim_api_key,
@@ -60,6 +78,7 @@ async def lifespan(app: FastAPI):
                 cache=cache,
                 cache_ttl=settings.cache_ttl,
                 stale_ttl=settings.cache_stale_ttl,
+                usage=usage,
             )
             app.state.navitia = NavitiaClient(
                 http,
@@ -69,6 +88,7 @@ async def lifespan(app: FastAPI):
                 places_ttl=settings.places_cache_ttl,
                 journeys_ttl=settings.itineraries_cache_ttl,
                 place_store=place_store,
+                usage=usage,
             )
             yield
     finally:
@@ -102,6 +122,14 @@ def get_navitia(request: Request) -> NavitiaClient:
 
 def get_itinerary_store(request: Request) -> ItineraryStore:
     return request.app.state.itinerary_store
+
+
+def get_usage_store(request: Request) -> UsageStore:
+    return request.app.state.usage_store
+
+
+def get_home_store(request: Request) -> HomeStore:
+    return request.app.state.home_store
 
 
 async def fetch_stop(prim: PrimClient, station_id: str) -> StopMonitoring:
@@ -358,9 +386,12 @@ def rename_journey(
     "/journeys/{journey_id}", status_code=204, summary="Supprimer un trajet", tags=["trajets"]
 )
 def delete_journey(
-    journey: SavedJourney = Depends(get_saved_or_404), store: JourneyStore = Depends(get_store)
+    journey: SavedJourney = Depends(get_saved_or_404),
+    store: JourneyStore = Depends(get_store),
+    home: HomeStore = Depends(get_home_store),
 ):
     store.delete(journey.id)
+    home.remove("journey", journey.id)
     return Response(status_code=204)
 
 
@@ -551,8 +582,10 @@ def rename_saved_itinerary(
 def delete_saved_itinerary(
     itinerary: SavedItinerary = Depends(get_saved_itinerary_or_404),
     store: ItineraryStore = Depends(get_itinerary_store),
+    home: HomeStore = Depends(get_home_store),
 ):
     store.delete(itinerary.id)
+    home.remove("itinerary", itinerary.id)
     return Response(status_code=204)
 
 
@@ -571,6 +604,125 @@ async def saved_itinerary_next(
 ):
     return await run_itineraries(
         navitia, itinerary.origin.id, itinerary.destination.id, when, represents, count
+    )
+
+
+# --- Page d'accueil ------------------------------------------------------------------------
+
+
+def _home_items(
+    refs: list[tuple[str, int]],
+    journeys: JourneyStore,
+    itineraries: ItineraryStore,
+    repo: StationRepository,
+) -> list[HomeItem]:
+    """Résout les références ; celles qui n'existent plus sont ignorées."""
+    items = []
+    for kind, ref_id in refs:
+        if kind == "journey":
+            row = journeys.get(ref_id)
+            journey = to_saved_journey(row, repo) if row else None
+            if journey:
+                items.append(HomeItem(kind=kind, id=ref_id, journey=journey))
+        else:
+            row = itineraries.get(ref_id)
+            if row:
+                items.append(HomeItem(kind=kind, id=ref_id, itinerary=to_saved_itinerary(row)))
+    return items
+
+
+@app.get("/home", response_model=HomeResponse, summary="Éléments de la page d'accueil", tags=["accueil"])
+def get_home(
+    home: HomeStore = Depends(get_home_store),
+    journeys: JourneyStore = Depends(get_store),
+    itineraries: ItineraryStore = Depends(get_itinerary_store),
+    repo: StationRepository = Depends(get_repo),
+):
+    return HomeResponse(items=_home_items(home.list(), journeys, itineraries, repo))
+
+
+@app.put(
+    "/home",
+    response_model=HomeResponse,
+    summary="Choisir les trajets et itinéraires de la page d'accueil (dans l'ordre)",
+    tags=["accueil"],
+)
+def update_home(
+    body: HomeUpdate,
+    home: HomeStore = Depends(get_home_store),
+    journeys: JourneyStore = Depends(get_store),
+    itineraries: ItineraryStore = Depends(get_itinerary_store),
+    repo: StationRepository = Depends(get_repo),
+):
+    refs: list[tuple[str, int]] = []
+    for item in body.items:
+        ref = (item.kind, item.id)
+        if ref in refs:
+            continue  # doublon ignoré
+        exists = journeys.get(item.id) if item.kind == "journey" else itineraries.get(item.id)
+        if exists is None:
+            label = "Trajet" if item.kind == "journey" else "Itinéraire"
+            raise HTTPException(422, f"{label} inconnu : {item.id}")
+        refs.append(ref)
+    home.replace(refs)
+    return HomeResponse(items=_home_items(refs, journeys, itineraries, repo))
+
+
+# --- Suivi de la consommation des API IDFM ------------------------------------------------
+
+
+@app.get(
+    "/usage",
+    response_model=UsageResponse,
+    summary="Consommation des API IDFM (appels, quotas, cache)",
+    tags=["consommation"],
+)
+def get_usage(
+    days: int = Query(30, ge=1, le=90, description="Nombre de jours d'historique"),
+    store: UsageStore = Depends(get_usage_store),
+):
+    today = now_paris().date()
+    since = today - timedelta(days=days - 1)
+    rows = {(r["day"], r["api"]): r for r in store.daily(since.isoformat())}
+
+    # Une ligne par jour et par API, y compris les jours sans appel
+    daily = [
+        UsageDay(**rows.get((d, api), {"day": d, "api": api, "calls": 0, "errors": 0, "cache_hits": 0}))
+        for d in ((since + timedelta(days=i)).isoformat() for i in range(days))
+        for api in APIS
+    ]
+    quotas = {"realtime": settings.quota_realtime, "navitia": settings.quota_navitia}
+    apis = []
+    for api, label in APIS.items():
+        r = rows.get((today.isoformat(), api), {})
+        calls, quota = r.get("calls", 0), quotas[api]
+        apis.append(
+            ApiUsageToday(
+                api=api,
+                label=label,
+                calls=calls,
+                errors=r.get("errors", 0),
+                cache_hits=r.get("cache_hits", 0),
+                quota=quota,
+                remaining=max(0, quota - calls) if quota else None,
+            )
+        )
+    return UsageResponse(
+        day=today.isoformat(),
+        apis=apis,
+        daily=daily,
+        hourly=[UsageHour(**r) for r in store.hourly(today.isoformat())],
+        endpoints=[UsageEndpoint(**r) for r in store.by_endpoint(today.isoformat())],
+        recent=[
+            UsageCall(
+                at=datetime.fromtimestamp(r["ts"], PARIS),
+                api=r["api"],
+                endpoint=r["endpoint"],
+                status=r["status"],
+                duration_ms=r["duration_ms"],
+            )
+            for r in store.recent()
+        ],
     )
 
 

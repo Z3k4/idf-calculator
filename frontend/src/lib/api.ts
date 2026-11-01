@@ -231,3 +231,41 @@ export const renameSavedItinerary = (id: number, name: string | null) =>
   send<SavedItinerary>('PATCH', `/itineraries/saved/${id}`, { name });
 
 export const deleteSavedItinerary = (id: number) => send<void>('DELETE', `/itineraries/saved/${id}`);
+
+// --- Consommation des API IDFM -----------------------------------------------------------
+
+export interface ApiUsageToday {
+  api: 'realtime' | 'navitia';
+  label: string;
+  calls: number;
+  errors: number;
+  cache_hits: number;
+  quota: number | null;
+  remaining: number | null;
+}
+
+export interface UsageResponse {
+  day: string;
+  timezone: string;
+  apis: ApiUsageToday[];
+  daily: { day: string; api: string; calls: number; errors: number; cache_hits: number }[];
+  hourly: { hour: number; api: string; calls: number }[];
+  endpoints: { api: string; endpoint: string; calls: number; errors: number; avg_ms: number }[];
+  recent: { at: string; api: string; endpoint: string; status: number; duration_ms: number }[];
+}
+
+export const getUsage = (days = 30) => get<UsageResponse>('/usage', { days });
+
+// --- Page d'accueil ------------------------------------------------------------------------
+
+export interface HomeItem {
+  kind: 'journey' | 'itinerary';
+  id: number;
+  journey: SavedJourney | null;
+  itinerary: SavedItinerary | null;
+}
+
+export const getHome = () => get<{ items: HomeItem[] }>('/home');
+
+export const updateHome = (items: { kind: HomeItem['kind']; id: number }[]) =>
+  send<{ items: HomeItem[] }>('PUT', '/home', { items });

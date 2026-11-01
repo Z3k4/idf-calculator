@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     itineraries_cache_ttl: float = 60.0
     # Cache persistant (SQLite) des recherches d'adresses : 30 jours
     places_db_ttl: float = 30 * 86400.0
+    # Quotas journaliers des API IDFM (remise à zéro à minuit, heure de Paris), pour la page de suivi.
+    # Calculateur : 1 000/jour pour les jetons créés depuis mars 2024 (catalogue PRIM).
+    # Temps réel : non renseigné par défaut, à ajuster selon votre abonnement PRIM.
+    quota_navitia: int | None = 1000
+    quota_realtime: int | None = None
+    # Historique des appels conservé (jours)
+    usage_retention_days: int = 90
     # Cache des réponses PRIM par gare (secondes) :
     # - cache_ttl : durée pendant laquelle la réponse est servie sans rappeler PRIM
     # - cache_stale_ttl : durée max pendant laquelle elle sert de secours si PRIM est en erreur

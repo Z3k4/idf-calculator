@@ -11,6 +11,7 @@ from typing import Any, Literal
 import httpx
 
 from .cache import Cache, MemoryCache
+from .usage import UsageTracker, nullcall as _nullcall
 from .models import Departure, Line
 from .stations import StationRepository
 
@@ -53,6 +54,7 @@ class PrimClient:
         cache: Cache | None = None,
         cache_ttl: float = 30.0,
         stale_ttl: float = 300.0,
+        usage: UsageTracker | None = None,
     ):
         self.http = http
         self.api_key = api_key
@@ -61,6 +63,7 @@ class PrimClient:
         self.cache_ttl = cache_ttl
         self.stale_ttl = max(stale_ttl, cache_ttl)
         self._locks: dict[str, asyncio.Lock] = {}
+        self.usage = usage
 
     async def stop_monitoring(self, station_id: str) -> StopMonitoring:
         """Réponse SIRI pour une gare (zone d'arrêt monomodale), via le cache."""
@@ -68,14 +71,14 @@ class PrimClient:
 
         entry = await self.cache.get(key)
         if entry and self._is_fresh(entry):
-            return self._result(entry, "HIT")
+            return await self._hit(entry)
 
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             # Une autre requête a peut-être rafraîchi l'entrée pendant l'attente
             entry = await self.cache.get(key)
             if entry and self._is_fresh(entry):
-                return self._result(entry, "HIT")
+                return await self._hit(entry)
 
             try:
                 data = await self._fetch(station_id)
@@ -90,6 +93,11 @@ class PrimClient:
             await self.cache.set(key, entry, self.stale_ttl)
             return self._result(entry, "MISS")
 
+    async def _hit(self, entry: dict) -> StopMonitoring:
+        if self.usage:
+            await self.usage.record_cache_hit("realtime")
+        return self._result(entry, "HIT")
+
     def _is_fresh(self, entry: dict) -> bool:
         return time.time() - entry["fetched_at"] < self.cache_ttl
 
@@ -98,18 +106,23 @@ class PrimClient:
         fetched_at = datetime.fromtimestamp(entry["fetched_at"], timezone.utc)
         return StopMonitoring(data=entry["data"], fetched_at=fetched_at, cache=status)
 
+    def _track(self):
+        return self.usage.track("realtime", "stop-monitoring") if self.usage else _nullcall()
+
     async def _fetch(self, station_id: str) -> dict:
         if not self.api_key:
             raise PrimConfigError("Clé API PRIM manquante (variable IDF_PRIM_API_KEY)")
 
-        try:
-            resp = await self.http.get(
-                self.url,
-                params={"MonitoringRef": f"STIF:StopArea:SP:{station_id}:"},
-                headers={"apikey": self.api_key, "Accept": "application/json"},
-            )
-        except httpx.HTTPError as exc:
-            raise PrimError(f"PRIM injoignable : {exc}") from exc
+        async with self._track() as call:
+            try:
+                resp = await self.http.get(
+                    self.url,
+                    params={"MonitoringRef": f"STIF:StopArea:SP:{station_id}:"},
+                    headers={"apikey": self.api_key, "Accept": "application/json"},
+                )
+            except httpx.HTTPError as exc:
+                raise PrimError(f"PRIM injoignable : {exc}") from exc
+            call.status = resp.status_code
         if resp.status_code != 200:
             raise PrimError(f"PRIM a répondu {resp.status_code} : {resp.text[:200]}")
 
