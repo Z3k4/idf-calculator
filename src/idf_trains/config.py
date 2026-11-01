@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     # Si renseigné (ex. redis://localhost:6379/0), cache partagé Redis au lieu de la mémoire
     redis_url: str = ""
     stations_file: Path = ROOT / "data" / "stations.json"
+    # Base SQLite des trajets sauvegardés
+    db_path: Path = ROOT / "data" / "journeys.db"
+    # Build du frontend Svelte servi sur « / » (ignoré si absent)
+    frontend_dir: Path = ROOT / "frontend" / "dist"
 
 
 settings = Settings()

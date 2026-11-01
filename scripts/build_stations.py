@@ -18,6 +18,7 @@ RAIL_MODES = {
     "LocalTrain": "Transilien",
     "regionalRail": "TER",
 }
+MODE_ORDER = list(RAIL_MODES.values())
 
 
 def build(src: Path) -> dict:
@@ -56,7 +57,7 @@ def build(src: Path) -> dict:
             station["lines"].append(line_id)
 
     for station in stations.values():
-        station["lines"].sort(key=lambda lid: (lines[lid]["mode"], lines[lid]["name"]))
+        station["lines"].sort(key=lambda lid: (MODE_ORDER.index(lines[lid]["mode"]), lines[lid]["name"]))
 
     return {
         "lines": dict(sorted(lines.items())),

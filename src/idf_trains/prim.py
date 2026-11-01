@@ -145,55 +145,116 @@ def _line_id(line_ref: str | None) -> str | None:
     return parts[-1] if parts else None
 
 
-def parse_departures(
-    siri: dict, repo: StationRepository, now: datetime | None = None
-) -> list[Departure]:
-    now = now or datetime.now(timezone.utc)
-    deliveries = siri.get("Siri", {}).get("ServiceDelivery", {}).get("StopMonitoringDelivery", [])
+@dataclass
+class StopVisit:
+    """Passage d'un train à une gare, extrait de la réponse SIRI."""
 
-    departures: list[Departure] = []
+    journey_ref: str | None
+    line_id: str | None
+    train_number: str | None
+    destination: str
+    direction: str | None
+    mission: str | None
+    platform: str | None
+    aimed_arrival: datetime | None
+    expected_arrival: datetime | None
+    aimed_departure: datetime | None
+    expected_departure: datetime | None
+    departure_status: str | None
+    arrival_status: str | None
+    at_stop: bool
+
+    @property
+    def departure_time(self) -> datetime | None:
+        return self.expected_departure or self.aimed_departure
+
+    @property
+    def arrival_time(self) -> datetime | None:
+        """Heure de passage côté arrivée (au terminus, il n'y a pas d'heure de départ)."""
+        return self.expected_arrival or self.aimed_arrival or self.departure_time
+
+    @property
+    def match_key(self) -> tuple | None:
+        """Clé identifiant un même train d'une gare à l'autre."""
+        if self.journey_ref:
+            return ("journey", self.journey_ref)
+        if self.train_number and self.line_id:
+            return ("train", self.line_id, self.train_number)
+        return None
+
+
+def parse_visits(siri: dict) -> list[StopVisit]:
+    deliveries = siri.get("Siri", {}).get("ServiceDelivery", {}).get("StopMonitoringDelivery", [])
+    visits: list[StopVisit] = []
     for delivery in deliveries:
         for visit in delivery.get("MonitoredStopVisit", []):
             journey = visit.get("MonitoredVehicleJourney", {})
             call = journey.get("MonitoredCall", {})
-
-            aimed = _dt(call.get("AimedDepartureTime"))
-            expected = _dt(call.get("ExpectedDepartureTime")) or aimed
-            if expected is None:
-                # Pas de départ : train qui arrive à son terminus
-                continue
-
-            # Trains déjà partis (on garde une petite marge pour ceux à quai)
-            seconds = (expected - now).total_seconds()
-            if seconds < -60:
-                continue
-
-            line_id = _line_id(_text(journey.get("LineRef")))
-            line = repo.line(line_id) if line_id else None
-            if line is None:
-                line = Line(id=line_id or "?", name=line_id or "?", mode="?")
-
-            train_numbers = journey.get("TrainNumbers", {}).get("TrainNumberRef", [])
-
-            departures.append(
-                Departure(
-                    line=line,
+            framed = journey.get("FramedVehicleJourneyRef") or {}
+            train_numbers = (journey.get("TrainNumbers") or {}).get("TrainNumberRef", [])
+            visits.append(
+                StopVisit(
+                    journey_ref=_text(framed.get("DatedVehicleJourneyRef")),
+                    line_id=_line_id(_text(journey.get("LineRef"))),
+                    train_number=_text(train_numbers),
                     destination=_text(call.get("DestinationDisplay"))
                     or _text(journey.get("DestinationName"))
                     or "?",
                     direction=_text(journey.get("DirectionName")),
                     mission=_text(journey.get("JourneyNote")),
-                    train_number=_text(train_numbers),
                     platform=_text(call.get("DeparturePlatformName"))
                     or _text(call.get("ArrivalPlatformName")),
-                    aimed_time=aimed,
-                    expected_time=expected,
-                    in_minutes=max(0, int(seconds // 60)),
-                    delay_minutes=int((expected - aimed).total_seconds() // 60) if aimed else 0,
-                    status=call.get("DepartureStatus") or "onTime",
-                    at_platform=bool(call.get("VehicleAtStop")),
+                    aimed_arrival=_dt(call.get("AimedArrivalTime")),
+                    expected_arrival=_dt(call.get("ExpectedArrivalTime")),
+                    aimed_departure=_dt(call.get("AimedDepartureTime")),
+                    expected_departure=_dt(call.get("ExpectedDepartureTime")),
+                    departure_status=call.get("DepartureStatus"),
+                    arrival_status=call.get("ArrivalStatus"),
+                    at_stop=bool(call.get("VehicleAtStop")),
                 )
             )
+    return visits
 
+
+def resolve_line(repo: StationRepository, line_id: str | None) -> Line:
+    line = repo.line(line_id) if line_id else None
+    return line or Line(id=line_id or "?", name=line_id or "?", mode="?")
+
+
+def _minutes(delta_seconds: float) -> int:
+    return int(delta_seconds // 60)
+
+
+def parse_departures(
+    siri: dict, repo: StationRepository, now: datetime | None = None
+) -> list[Departure]:
+    now = now or datetime.now(timezone.utc)
+    departures: list[Departure] = []
+    for v in parse_visits(siri):
+        expected = v.departure_time
+        if expected is None:
+            # Pas de départ : train qui arrive à son terminus
+            continue
+        # Trains déjà partis (on garde une petite marge pour ceux à quai)
+        seconds = (expected - now).total_seconds()
+        if seconds < -60:
+            continue
+        aimed = v.aimed_departure
+        departures.append(
+            Departure(
+                line=resolve_line(repo, v.line_id),
+                destination=v.destination,
+                direction=v.direction,
+                mission=v.mission,
+                train_number=v.train_number,
+                platform=v.platform,
+                aimed_time=aimed,
+                expected_time=expected,
+                in_minutes=max(0, _minutes(seconds)),
+                delay_minutes=_minutes((expected - aimed).total_seconds()) if aimed else 0,
+                status=v.departure_status or "onTime",
+                at_platform=v.at_stop,
+            )
+        )
     departures.sort(key=lambda d: d.expected_time)
     return departures
