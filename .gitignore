@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+# Export brut IDFM (30 Mo), régénérable : voir README
+arrets-lignes.json
