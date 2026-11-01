@@ -1,9 +1,10 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { getStation, type Station } from './lib/api';
+  import { getStation, type Place, type Station } from './lib/api';
   import Departures from './lib/Departures.svelte';
   import LineBadge from './lib/LineBadge.svelte';
   import StationSearch from './lib/StationSearch.svelte';
+  import ItineraryPlanner from './pages/ItineraryPlanner.svelte';
   import JourneyPlanner from './pages/JourneyPlanner.svelte';
   import SavedJourneyDetail from './pages/SavedJourneyDetail.svelte';
   import SavedJourneys from './pages/SavedJourneys.svelte';
@@ -37,6 +38,7 @@
   type Page =
     | { name: 'home' }
     | { name: 'planner'; from: string | null; to: string | null }
+    | { name: 'itinerary'; from: Place | null; to: Place | null; mode: 'now' | 'departure' | 'arrival'; when: string | null }
     | { name: 'journeys' }
     | { name: 'journey'; id: number };
 
@@ -46,10 +48,26 @@
     const [path, query = ''] = location.hash.replace(/^#/, '').split('?');
     const params = new URLSearchParams(query);
     if (path === '/trajet') return { name: 'planner', from: params.get('from'), to: params.get('to') };
+    if (path === '/itineraire') {
+      const mode = params.get('mode');
+      return {
+        name: 'itinerary',
+        from: placeFromUrl(params.get('from'), params.get('fromName')),
+        to: placeFromUrl(params.get('to'), params.get('toName')),
+        mode: mode === 'departure' || mode === 'arrival' ? mode : 'now',
+        when: params.get('when'),
+      };
+    }
     if (path === '/trajets') return { name: 'journeys' };
     const m = path.match(/^\/trajets\/(\d+)$/);
     if (m) return { name: 'journey', id: Number(m[1]) };
     return { name: 'home' };
+  }
+
+  function placeFromUrl(id: string | null, name: string | null): Place | null {
+    if (!id) return null;
+    const type = id.startsWith('stop_area') ? 'stop_area' : id.startsWith('poi') ? 'poi' : name === 'Ma position' ? 'position' : 'address';
+    return { id, name: name || id, type };
   }
 
   async function route() {
@@ -88,7 +106,7 @@
   });
 
   $effect(() => {
-    const titles: Record<string, string> = { planner: 'Trajet direct', journeys: 'Mes trajets' };
+    const titles: Record<string, string> = { planner: 'Trajet direct', journeys: 'Mes trajets', itinerary: 'Itinéraire' };
     if (page.name === 'journey') return; // titre fixé par la page du trajet
     const title = page.name === 'home' ? station?.name : titles[page.name];
     document.title = title ? `${title} · Prochains trains` : 'Prochains trains IDF';
@@ -104,6 +122,7 @@
       </a>
       <nav aria-label="Navigation principale">
         <a href="#/" class:active={page.name === 'home'}>Départs</a>
+        <a href="#/itineraire" class:active={page.name === 'itinerary'}>Itinéraire</a>
         <a href="#/trajet" class:active={page.name === 'planner'}>Trajet</a>
         <a href="#/trajets" class:active={page.name === 'journeys' || page.name === 'journey'}>Mes trajets</a>
       </nav>
@@ -111,7 +130,9 @@
   </header>
 
   <main>
-  {#if page.name === 'planner'}
+  {#if page.name === 'itinerary'}
+    <ItineraryPlanner initial={page} />
+  {:else if page.name === 'planner'}
     <JourneyPlanner fromId={page.from} toId={page.to} />
   {:else if page.name === 'journeys'}
     <SavedJourneys />
@@ -182,8 +203,11 @@
   nav {
     display: flex;
     gap: 0.25rem;
+    max-width: 100%;
+    overflow-x: auto;
   }
   nav a {
+    white-space: nowrap;
     color: rgb(255 255 255 / 0.75);
     text-decoration: none;
     font-weight: 600;

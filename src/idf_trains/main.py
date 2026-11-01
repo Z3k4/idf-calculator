@@ -11,7 +11,9 @@ from .config import settings
 from .journeys import common_lines, find_direct_trains
 from .models import (
     DeparturesResponse,
+    ItinerariesResponse,
     JourneyNextResponse,
+    Place,
     SavedJourney,
     SavedJourneyCreate,
     SavedJourneyUpdate,
@@ -26,6 +28,7 @@ from .prim import (
     parse_departures,
     parse_visits,
 )
+from .navitia import PLACE_ID, NavitiaClient, NavitiaError, NoSolution
 from .stations import StationRepository
 from .storage import DuplicateJourneyError, JourneyRow, JourneyStore
 
@@ -44,6 +47,14 @@ async def lifespan(app: FastAPI):
                 cache=cache,
                 cache_ttl=settings.cache_ttl,
                 stale_ttl=settings.cache_stale_ttl,
+            )
+            app.state.navitia = NavitiaClient(
+                http,
+                settings.prim_api_key,
+                settings.navitia_url,
+                cache=cache,
+                places_ttl=settings.places_cache_ttl,
+                journeys_ttl=settings.itineraries_cache_ttl,
             )
             yield
     finally:
@@ -69,6 +80,10 @@ def get_prim(request: Request) -> PrimClient:
 
 def get_store(request: Request) -> JourneyStore:
     return request.app.state.store
+
+
+def get_navitia(request: Request) -> NavitiaClient:
+    return request.app.state.navitia
 
 
 async def fetch_stop(prim: PrimClient, station_id: str) -> StopMonitoring:
@@ -345,6 +360,80 @@ async def saved_journey_next(
     prim: PrimClient = Depends(get_prim),
 ):
     return await compute_next_trains(journey.origin, journey.destination, repo, prim, limit, line)
+
+
+# --- Itinéraires entre deux adresses (calculateur Navitia IDFM) ---------------------------
+
+
+def _navitia_http_error(exc: PrimError) -> HTTPException:
+    if isinstance(exc, PrimConfigError):
+        return HTTPException(503, str(exc))
+    status = exc.status if isinstance(exc, NavitiaError) else 502
+    return HTTPException(status, str(exc))
+
+
+def _place_id(value: str, role: str) -> str:
+    value = value.strip()
+    if not PLACE_ID.fullmatch(value):
+        raise HTTPException(422, f"Lieu {role} invalide : utilisez un identifiant de /places ou « lon;lat »")
+    return value
+
+
+@app.get(
+    "/places",
+    response_model=list[Place],
+    summary="Rechercher une adresse, un arrêt ou un lieu",
+    tags=["itinéraires"],
+)
+async def search_places(
+    q: str = Query(..., min_length=3, max_length=200, description="Adresse, arrêt, lieu ou commune"),
+    limit: int = Query(8, ge=1, le=20),
+    navitia: NavitiaClient = Depends(get_navitia),
+):
+    try:
+        return await navitia.places(q, count=limit)
+    except NoSolution:
+        return []
+    except PrimError as exc:
+        raise _navitia_http_error(exc) from exc
+
+
+@app.get(
+    "/itineraries",
+    response_model=ItinerariesResponse,
+    summary="Calculer un itinéraire entre deux lieux",
+    tags=["itinéraires"],
+)
+async def compute_itineraries(
+    origin: str = Query(..., alias="from", description="Identifiant de lieu (/places) ou « lon;lat »"),
+    destination: str = Query(..., alias="to", description="Identifiant de lieu (/places) ou « lon;lat »"),
+    when: datetime | None = Query(
+        None,
+        alias="datetime",
+        description="Date et heure (ISO 8601, heure de Paris si sans fuseau). Par défaut : maintenant",
+    ),
+    represents: str = Query(
+        "departure", pattern="^(departure|arrival)$", description="Partir à (departure) ou arriver avant (arrival)"
+    ),
+    count: int = Query(3, ge=1, le=6, description="Nombre d'itinéraires"),
+    navitia: NavitiaClient = Depends(get_navitia),
+):
+    origin = _place_id(origin, "de départ")
+    destination = _place_id(destination, "d'arrivée")
+    if origin == destination:
+        raise HTTPException(422, "Les lieux de départ et d'arrivée doivent être différents")
+    try:
+        itineraries = await navitia.journeys(origin, destination, when, represents, count)
+    except NoSolution as exc:
+        return ItinerariesResponse(origin=origin, destination=destination, itineraries=[], message=str(exc))
+    except PrimError as exc:
+        raise _navitia_http_error(exc) from exc
+    return ItinerariesResponse(
+        origin=origin,
+        destination=destination,
+        itineraries=itineraries,
+        message=None if itineraries else "Aucun itinéraire trouvé.",
+    )
 
 
 # Frontend Svelte compilé (cd frontend && npm run build), servi sur « / » s'il existe.

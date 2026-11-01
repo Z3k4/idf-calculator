@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     prim_api_key: str = ""
     prim_url: str = "https://prim.iledefrance-mobilites.fr/marketplace/stop-monitoring"
     prim_timeout: float = 10.0
+    # Calculateur d'itinéraires IDFM (Navitia, même clé API PRIM)
+    navitia_url: str = "https://prim.iledefrance-mobilites.fr/marketplace/v2/navitia"
+    # Cache Navitia (secondes) : le quota des jetons récents est de 1 000 requêtes/jour
+    places_cache_ttl: float = 86400.0
+    itineraries_cache_ttl: float = 60.0
     # Cache des réponses PRIM par gare (secondes) :
     # - cache_ttl : durée pendant laquelle la réponse est servie sans rappeler PRIM
     # - cache_stale_ttl : durée max pendant laquelle elle sert de secours si PRIM est en erreur

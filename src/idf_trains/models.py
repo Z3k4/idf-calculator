@@ -97,3 +97,65 @@ class SavedJourney(BaseModel):
     destination: Station
     common_lines: list[Line]
     created_at: datetime
+
+
+# --- Itinéraires (calculateur Navitia IDFM) ----------------------------------------------
+
+
+class Place(BaseModel):
+    """Lieu utilisable comme départ/arrivée : adresse, arrêt, point d'intérêt, commune."""
+
+    # Identifiant Navitia (ex. « stop_area:IDFM:71517 ») ou coordonnées « lon;lat » pour une adresse
+    id: str
+    name: str
+    type: str
+    city: str | None = None
+    lat: float | None = None
+    lon: float | None = None
+
+
+class TransitLine(BaseModel):
+    code: str
+    name: str | None = None
+    mode: str
+    network: str | None = None
+    color: str | None = None
+    text_color: str | None = None
+
+
+class ItinerarySection(BaseModel):
+    # walk : marche · transit : transport en commun · transfer : correspondance à pied · wait : attente
+    type: str
+    departure: datetime | None = None
+    arrival: datetime | None = None
+    duration_minutes: int
+    from_name: str | None = None
+    to_name: str | None = None
+    line: TransitLine | None = None
+    direction: str | None = None
+    headsign: str | None = None
+    stops: list[str] = []
+    delay_minutes: int = 0
+    distance_m: int | None = None
+    # Tracé [[lon, lat], …] pour un affichage cartographique
+    geometry: list[list[float]] = []
+
+
+class Itinerary(BaseModel):
+    departure: datetime
+    arrival: datetime
+    duration_minutes: int
+    transfers: int
+    walking_minutes: int
+    walking_distance_m: int | None = None
+    co2_grams: float | None = None
+    tags: list[str] = []
+    status: str | None = None
+    sections: list[ItinerarySection]
+
+
+class ItinerariesResponse(BaseModel):
+    origin: str
+    destination: str
+    itineraries: list[Itinerary]
+    message: str | None = None

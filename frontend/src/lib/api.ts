@@ -140,3 +140,74 @@ export const renameJourney = (id: number, name: string | null) =>
   send<SavedJourney>('PATCH', `/journeys/${id}`, { name });
 
 export const deleteJourney = (id: number) => send<void>('DELETE', `/journeys/${id}`);
+
+// --- Itinéraires (calculateur IDFM) ------------------------------------------------------
+
+export interface Place {
+  id: string; // identifiant Navitia ou « lon;lat »
+  name: string;
+  type: 'address' | 'stop_area' | 'poi' | 'administrative_region' | 'position';
+  city?: string | null;
+  lat?: number | null;
+  lon?: number | null;
+}
+
+export interface TransitLine {
+  code: string;
+  name: string | null;
+  mode: string;
+  network: string | null;
+  color: string | null;
+  text_color: string | null;
+}
+
+export interface ItinerarySection {
+  type: 'walk' | 'transit' | 'transfer' | 'wait';
+  departure: string | null;
+  arrival: string | null;
+  duration_minutes: number;
+  from_name: string | null;
+  to_name: string | null;
+  line: TransitLine | null;
+  direction: string | null;
+  headsign: string | null;
+  stops: string[];
+  delay_minutes: number;
+  distance_m: number | null;
+  geometry: number[][];
+}
+
+export interface Itinerary {
+  departure: string;
+  arrival: string;
+  duration_minutes: number;
+  transfers: number;
+  walking_minutes: number;
+  walking_distance_m: number | null;
+  co2_grams: number | null;
+  tags: string[];
+  status: string | null;
+  sections: ItinerarySection[];
+}
+
+export interface ItinerariesResponse {
+  origin: string;
+  destination: string;
+  itineraries: Itinerary[];
+  message: string | null;
+}
+
+export const searchPlaces = (q: string, signal?: AbortSignal) => get<Place[]>('/places', { q, limit: 8 }, signal);
+
+export function getItineraries(
+  from: string,
+  to: string,
+  options: { datetime?: string; represents?: 'departure' | 'arrival'; count?: number } = {},
+) {
+  const params: Record<string, string | number> = { from, to, count: options.count ?? 4 };
+  if (options.datetime) {
+    params.datetime = options.datetime;
+    params.represents = options.represents ?? 'departure';
+  }
+  return get<ItinerariesResponse>('/itineraries', params);
+}

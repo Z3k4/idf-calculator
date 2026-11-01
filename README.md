@@ -27,6 +27,7 @@ lien partageable (`#/gare/45102`), thème clair/sombre automatique.
 Pages :
 
 - `#/` : recherche d'une gare et prochains départs ;
+- `#/itineraire` : itinéraire entre deux adresses (autocomplétion, « Ma position », partir/arriver à) ;
 - `#/trajet?from=…&to=…` : choix d'une gare de départ et d'arrivée, prochains trains directs, sauvegarde ;
 - `#/trajets` : trajets sauvegardés avec le prochain train de chacun ;
 - `#/trajets/{id}` : détail d'un trajet (renommer, supprimer, trajet retour).
@@ -60,6 +61,8 @@ uv run uvicorn idf_trains.main:app            # -> http://localhost:8000
 | PATCH | `/journeys/{id}` | Renommer `{"name"}` |
 | DELETE | `/journeys/{id}` | Supprimer |
 | GET | `/journeys/{id}/next` | Prochains trains d'un trajet sauvegardé |
+| GET | `/places?q=12 rue de rivoli` | Recherche d'adresse, arrêt, lieu ou commune (calculateur IDFM) |
+| GET | `/itineraries?from=…&to=…` | Itinéraire entre deux lieux (tous modes IDFM) |
 | GET | `/health` | Healthcheck |
 
 Exemple : `GET /stations/45102/departures?line=A`
@@ -123,6 +126,31 @@ d'arrivée *après* la gare de départ. Le train dessert donc bien la gare d'arr
 
 Les trajets sauvegardés sont stockés dans une base SQLite (`IDF_DB_PATH`, par défaut `data/journeys.db`).
 Un même trajet (départ + arrivée) ne peut être sauvegardé qu'une fois (409) ; le sens inverse est un autre trajet.
+
+### Itinéraires entre deux adresses
+
+S'appuie sur le **calculateur d'itinéraires Île-de-France Mobilités** (API Navitia exposée par PRIM,
+`https://prim.iledefrance-mobilites.fr/marketplace/v2/navitia`, même clé API). Dans le catalogue PRIM, abonnez-vous
+à l'API « Calculateur Île-de-France Mobilités – Accès générique ».
+
+1. `GET /places?q=12 rue de rivoli` renvoie des lieux avec un `id` (adresse : coordonnées `lon;lat`,
+   arrêt : `stop_area:IDFM:…`, point d'intérêt, commune).
+2. `GET /itineraries?from=<id>&to=<id>` calcule les itinéraires (métro, RER, Transilien, tram, bus, marche) :
+
+| Paramètre | Description |
+|---|---|
+| `from`, `to` | Identifiant renvoyé par `/places`, ou coordonnées `lon;lat` |
+| `datetime` | Date/heure ISO 8601 (heure de Paris si sans fuseau). Par défaut : maintenant |
+| `represents` | `departure` (partir à, défaut) ou `arrival` (arriver avant) |
+| `count` | Nombre d'itinéraires (1 à 6, défaut 3) |
+
+Chaque itinéraire donne les horaires, la durée, le nombre de correspondances, la marche, le CO₂ et la liste des
+étapes : marche, attente, correspondance et trajets en transport (ligne avec sa couleur officielle, direction,
+arrêts desservis, retard temps réel, tracé GeoJSON).
+
+**Quota** : les jetons PRIM récents sont limités à **1 000 requêtes/jour** sur cette API. Les recherches de lieux sont
+mises en cache 24 h (`IDF_PLACES_CACHE_TTL`) et les itinéraires 60 s (`IDF_ITINERARIES_CACHE_TTL`). Le frontend
+attend une pause dans la frappe avant de chercher une adresse et ne rafraîchit pas les itinéraires automatiquement.
 
 ### Recherche par nom
 

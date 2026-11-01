@@ -5,3 +5,6 @@ __pycache__/
 .env
 # Export brut IDFM (30 Mo), régénérable : voir README
 arrets-lignes.json
+frontend/node_modules/
+frontend/dist/
+data/journeys.db

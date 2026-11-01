@@ -11,6 +11,8 @@ export default defineConfig({
       '/stations': API,
       '/health': API,
       '/journeys': API,
+      '/places': API,
+      '/itineraries': API,
     },
   },
 });
