@@ -9,7 +9,7 @@
   } from '../lib/api';
   import ItineraryResults from '../lib/ItineraryResults.svelte';
   import PlacePicker from '../lib/PlacePicker.svelte';
-  import TimeChooser, { toSchedule, type TimeMode, type TimeValue } from '../lib/TimeChooser.svelte';
+  import TimeChooser, { sameSchedule, toSchedule, type TimeMode, type TimeValue } from '../lib/TimeChooser.svelte';
 
   let {
     initial,
@@ -85,13 +85,17 @@
       location.hash = `#/itineraires/${saved.id}`;
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        // Le même départ/arrivée existe déjà : proposer de le mettre à jour plutôt que de bloquer
+        // Mêmes lieux et même horaire : doublon exact (un autre horaire, lui, est accepté)
         const all = await listSavedItineraries().catch(() => []);
-        existingId = all.find((s) => s.origin.id === origin?.id && s.destination.id === destination?.id)?.id ?? null;
+        existingId =
+          all.find(
+            (s) =>
+              s.origin.id === origin?.id && s.destination.id === destination?.id && sameSchedule(s.schedule, schedule),
+          )?.id ?? null;
         saveError =
           editId !== null
-            ? 'Un autre itinéraire sauvegardé relie déjà ces deux lieux.'
-            : 'Cet itinéraire est déjà sauvegardé.';
+            ? 'Un autre itinéraire sauvegardé relie déjà ces deux lieux avec cet horaire.'
+            : 'Cet itinéraire est déjà sauvegardé avec cet horaire. Choisissez un autre horaire pour en ajouter un nouveau.';
       } else {
         saveError = (err as Error).message;
       }
@@ -100,20 +104,6 @@
     }
   }
 
-  /** Après un doublon : applique l'horaire (et le nom s'il est renseigné) à l'itinéraire existant. */
-  async function updateExisting() {
-    if (existingId === null) return;
-    saving = true;
-    try {
-      const changes = { schedule: toSchedule(mode, time), ...(name.trim() ? { name: name.trim() } : {}) };
-      const saved = await updateSavedItinerary(existingId, changes);
-      location.hash = `#/itineraires/${saved.id}`;
-    } catch (err) {
-      saveError = (err as Error).message;
-    } finally {
-      saving = false;
-    }
-  }
 </script>
 
 <section class="card form">
@@ -148,15 +138,15 @@
         {saving ? 'Enregistrement…' : editId !== null ? 'Mettre à jour' : 'Sauvegarder'}
       </button>
       {#if editId !== null}<a class="cancel" href="#/itineraires/{editId}">Annuler</a>{/if}
-      <p class="hint">L'horaire choisi ci-dessus est enregistré avec l'itinéraire.</p>
+      <p class="hint">
+        L'horaire choisi ci-dessus est enregistré avec l'itinéraire. Vous pouvez sauvegarder le même trajet plusieurs
+        fois avec des horaires différents (ex. aller le matin, retour le soir).
+      </p>
     {/if}
     {#if saveError}
       <p class="hint error">
         {saveError}
         {#if existingId !== null && existingId !== editId}
-          {#if editId === null}
-            <button type="button" class="link" onclick={updateExisting} disabled={saving}>Mettre à jour l'itinéraire existant</button>
-          {/if}
           <a href="#/itineraires/{existingId}">Voir l'itinéraire</a>
         {/if}
       </p>
@@ -269,15 +259,6 @@
   .error a {
     color: var(--accent);
     margin-left: 0.4rem;
-  }
-  .save .link {
-    background: none;
-    border: 0;
-    padding: 0;
-    margin-left: 0.4rem;
-    color: var(--accent);
-    font-weight: 600;
-    text-decoration: underline;
   }
   .cancel {
     align-self: center;

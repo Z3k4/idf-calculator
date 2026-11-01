@@ -205,6 +205,11 @@ def test_saved_itineraries_crud(client):
     sid = saved["id"]
 
     assert client.post("/itineraries/saved", json={"origin": RIVOLI, "destination": GDL}).status_code == 409
+    # Mêmes lieux avec un autre horaire : nouvel itinéraire
+    morning = {"mode": "departure", "time": "08:00"}
+    resp = client.post("/itineraries/saved", json={"origin": RIVOLI, "destination": GDL, "schedule": morning})
+    assert resp.status_code == 201, resp.text
+    client.delete(f"/itineraries/saved/{resp.json()['id']}")
     # Sens inverse : autre itinéraire
     assert client.post("/itineraries/saved", json={"origin": GDL, "destination": RIVOLI}).status_code == 201
     assert len(client.get("/itineraries/saved").json()) == 2
@@ -345,11 +350,35 @@ def test_create_with_schedule_and_partial_updates(client):
     assert client.patch(f"/itineraries/saved/{sid}", json={"name": None}).json()["name"] is None
 
 
+def test_same_itinerary_saved_several_times_with_different_schedules(client):
+    def save(schedule):
+        return client.post("/itineraries/saved", json={"origin": RIVOLI, "destination": GDL, "schedule": schedule})
+
+    a = save({"mode": "departure", "time": "08:00"})
+    b = save({"mode": "departure", "time": "17:30"})
+    c = save({"mode": "arrival", "time": "08:00"})
+    d = save({"mode": "departure", "date": "2026-11-05", "time": "08:00"})
+    assert [r.status_code for r in (a, b, c, d)] == [201, 201, 201, 201]
+    assert len(client.get("/itineraries/saved").json()) == 4
+
+    # Même horaire exact : doublon
+    assert save({"mode": "departure", "time": "08:00"}).status_code == 409
+    # Donner à l'un l'horaire d'un autre : doublon
+    resp = client.patch(f"/itineraries/saved/{b.json()['id']}", json={"schedule": {"mode": "departure", "time": "08:00"}})
+    assert resp.status_code == 409
+
+
 def test_update_to_an_existing_pair_conflicts(client):
     a = client.post("/itineraries/saved", json={"origin": RIVOLI, "destination": GDL}).json()["id"]
     b = client.post("/itineraries/saved", json={"origin": GDL, "destination": RIVOLI}).json()["id"]
     resp = client.patch(f"/itineraries/saved/{b}", json={"origin": RIVOLI, "destination": GDL})
     assert resp.status_code == 409
+    # Même paire mais horaire différent : accepté
+    resp = client.patch(
+        f"/itineraries/saved/{b}",
+        json={"origin": RIVOLI, "destination": GDL, "schedule": {"mode": "arrival", "time": "09:00"}},
+    )
+    assert resp.status_code == 200, resp.text
     assert client.patch(f"/itineraries/saved/{a}", json={"destination": RIVOLI}).status_code == 422  # départ = arrivée
 
 
@@ -402,3 +431,34 @@ def test_old_database_is_migrated(tmp_path):
     assert row.name == "Ancien" and row.schedule == {"mode": "now", "date": None, "time": None}
     updated = store.update(row.id, schedule={"mode": "arrival", "date": None, "time": "08:30"})
     assert updated.schedule["time"] == "08:30"
+
+
+def test_migration_drops_old_unique_pair_constraint(tmp_path):
+    """Bases créées avant les horaires multiples : la contrainte UNIQUE (départ, arrivée) est retirée."""
+    import json
+    import sqlite3
+
+    db_path = tmp_path / "old.db"
+    db = sqlite3.connect(db_path)
+    db.executescript(
+        """
+        CREATE TABLE saved_itineraries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, origin_id TEXT NOT NULL,
+            destination_id TEXT NOT NULL, origin TEXT NOT NULL, destination TEXT NOT NULL,
+            created_at TEXT NOT NULL, UNIQUE (origin_id, destination_id)
+        );
+        """
+    )
+    db.execute(
+        "INSERT INTO saved_itineraries (name, origin_id, destination_id, origin, destination, created_at) "
+        "VALUES ('Boulot', ?, ?, ?, ?, '2026-01-01T00:00:00+00:00')",
+        (RIVOLI["id"], GDL["id"], json.dumps(RIVOLI), json.dumps(GDL)),
+    )
+    db.commit()
+    db.close()
+
+    store = ItineraryStore(db_path)
+    [old] = store.list()
+    assert old.name == "Boulot" and old.schedule == {"mode": "now", "date": None, "time": None}
+    other = store.create(RIVOLI, GDL, "Soir", {"mode": "departure", "date": None, "time": "18:00"})
+    assert other.id != old.id and len(ItineraryStore(db_path).list()) == 2

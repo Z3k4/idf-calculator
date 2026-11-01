@@ -12,3 +12,12 @@ export function updatedLabel(iso: string, now: number) {
 
 export const journeyTitle = (j: { name: string | null; origin: { name: string }; destination: { name: string } }) =>
   j.name ?? `${j.origin.name} → ${j.destination.name}`;
+
+/** Horaire enregistré d'un itinéraire, ex. « Départ à 8h00 », « Arrivée le 05/11 à 9h00 » ; null = maintenant. */
+export function scheduleLabel(s: { mode: 'now' | 'departure' | 'arrival'; date: string | null; time: string | null }) {
+  if (s.mode === 'now') return null;
+  const parts = [s.mode === 'arrival' ? 'Arrivée' : 'Départ'];
+  if (s.date) parts.push(`le ${s.date.split('-').reverse().join('/')}`);
+  if (s.time) parts.push(`à ${s.time.replace(':', 'h')}`);
+  return parts.join(' ');
+}

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { listJourneys, listSavedItineraries, type SavedItinerary, type SavedJourney } from '../lib/api';
-  import { journeyTitle } from '../lib/format';
+  import { journeyTitle, scheduleLabel } from '../lib/format';
   import SavedJourneyCard from './SavedJourneyCard.svelte';
 
   let journeys = $state<SavedJourney[] | null>(null);
@@ -43,6 +43,7 @@
               <span class="route">
                 <span class="dot end"></span>{it.destination.name}
               </span>
+              <span class="sched">🕒 {scheduleLabel(it.schedule) ?? 'Maintenant'}</span>
               <span class="go">Voir les itinéraires →</span>
             </a>
           </li>
@@ -123,6 +124,10 @@
   }
   .dot.end {
     background: var(--accent);
+  }
+  .sched {
+    font-size: 0.85rem;
+    font-weight: 600;
   }
   .go {
     margin-top: 0.3rem;

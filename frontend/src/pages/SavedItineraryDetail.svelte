@@ -1,5 +1,7 @@
 <script lang="ts">
   import {
+    ApiError,
+    createSavedItinerary,
     deleteSavedItinerary,
     getSavedItinerary,
     renameSavedItinerary,
@@ -27,6 +29,7 @@
   let draftName = $state('');
   let savingSchedule = $state(false);
   let scheduleSaved = $state(false);
+  let scheduleError = $state<string | null>(null);
 
   $effect(() => {
     const iid = id;
@@ -53,13 +56,34 @@
     mode;
     time;
     scheduleSaved = false;
+    scheduleError = null;
   });
+
+  const duplicateMessage = 'Cet itinéraire est déjà sauvegardé avec cet horaire.';
 
   async function saveSchedule() {
     savingSchedule = true;
+    scheduleError = null;
     try {
       itinerary = await updateSavedItinerary(id, { schedule: toSchedule(mode, time) });
       scheduleSaved = true;
+    } catch (err) {
+      scheduleError = err instanceof ApiError && err.status === 409 ? duplicateMessage : (err as Error).message;
+    } finally {
+      savingSchedule = false;
+    }
+  }
+
+  /** Ajoute le même itinéraire avec l'horaire affiché, sans modifier celui-ci. */
+  async function saveAsNew() {
+    if (!itinerary) return;
+    savingSchedule = true;
+    scheduleError = null;
+    try {
+      const copy = await createSavedItinerary(itinerary.origin, itinerary.destination, itinerary.name, toSchedule(mode, time));
+      location.hash = `#/itineraires/${copy.id}`;
+    } catch (err) {
+      scheduleError = err instanceof ApiError && err.status === 409 ? duplicateMessage : (err as Error).message;
     } finally {
       savingSchedule = false;
     }
@@ -126,10 +150,16 @@
     {#if scheduleChanged}
       <div class="schedule-bar">
         <span>Horaire modifié</span>
-        <button onclick={saveSchedule} disabled={savingSchedule}>
-          {savingSchedule ? 'Enregistrement…' : 'Enregistrer cet horaire'}
-        </button>
+        <span class="schedule-actions">
+          <button class="ghost" onclick={saveAsNew} disabled={savingSchedule} title="Conserve cet itinéraire et en ajoute un autre avec l'horaire affiché">
+            + Ajouter avec cet horaire
+          </button>
+          <button onclick={saveSchedule} disabled={savingSchedule}>
+            {savingSchedule ? 'Enregistrement…' : "Remplacer l'horaire"}
+          </button>
+        </span>
       </div>
+      {#if scheduleError}<p class="schedule-error">{scheduleError}</p>{/if}
     {:else if scheduleSaved}
       <p class="saved">✓ Horaire enregistré</p>
     {/if}
@@ -240,6 +270,16 @@
     background: var(--accent-soft);
     font-size: 0.9rem;
     font-weight: 600;
+  }
+  .schedule-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  .schedule-error {
+    margin: 0;
+    color: var(--danger);
+    font-size: 0.9rem;
   }
   .saved {
     margin: 0;

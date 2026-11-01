@@ -290,8 +290,16 @@ class HomeItemRef(BaseModel):
     id: int
 
 
-class HomeUpdate(BaseModel):
-    items: list[HomeItemRef] = Field(..., max_length=20)
+class HomeGroupCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=40)
+    items: list[HomeItemRef] = Field(default_factory=list, max_length=20)
+
+
+class HomeGroupUpdate(BaseModel):
+    """Mise à jour partielle d'un groupe : nom et/ou éléments affichés (dans l'ordre)."""
+
+    name: str | None = Field(None, min_length=1, max_length=40)
+    items: list[HomeItemRef] | None = Field(None, max_length=20)
 
 
 class HomeItem(BaseModel):
@@ -301,5 +309,11 @@ class HomeItem(BaseModel):
     itinerary: SavedItinerary | None = None
 
 
-class HomeResponse(BaseModel):
+class HomeGroup(BaseModel):
+    id: int
+    name: str
     items: list[HomeItem]
+
+
+class HomeResponse(BaseModel):
+    groups: list[HomeGroup]

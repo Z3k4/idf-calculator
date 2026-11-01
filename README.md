@@ -57,10 +57,10 @@ lien partageable (`#/gare/45102`), thème clair/sombre automatique.
 
 Pages :
 
-- `#/` : **accueil personnalisable** : les trajets et itinéraires sauvegardés choisis (bouton « Personnaliser » : cocher, ordonner), avec les prochains trains directs en direct et le meilleur itinéraire calculé à l'ouverture ;
+- `#/` : **accueil personnalisable par groupes** (ex. « Semaine », « Week-end ») : onglets pour changer à tout moment le groupe affiché (mémorisé dans le navigateur), « + Groupe » pour en créer, « Personnaliser » pour renommer, cocher, ordonner ou supprimer le groupe, avec les prochains trains directs en direct et le meilleur itinéraire calculé à l'ouverture ;
 - `#/departs` : recherche d'une gare et prochains départs ;
 - `#/itineraire` : itinéraire entre deux adresses (autocomplétion, adresses récentes, « Ma position », partir/arriver à, sauvegarde) ;
-- `#/itineraires/{id}` : itinéraire sauvegardé, calculé avec son horaire enregistré (« Enregistrer cet horaire » si on le change, « Modifier » pour changer lieux/nom/horaire, renommer, supprimer, itinéraire retour) ;
+- `#/itineraires/{id}` : itinéraire sauvegardé, calculé avec son horaire enregistré (si on change l'horaire : « Remplacer l'horaire » ou « Ajouter avec cet horaire » pour garder les deux, « Modifier » pour changer lieux/nom/horaire, renommer, supprimer, itinéraire retour) ;
 - `#/trajet?from=…&to=…` : choix d'une gare de départ et d'arrivée, prochains trains directs, sauvegarde ;
 - `#/conso` : consommation des API IDFM (quotas, historique, cache, derniers appels) ;
 - `#/trajets` : itinéraires et trajets directs sauvegardés (avec le prochain train pour les trajets directs) ;
@@ -102,8 +102,9 @@ uv run uvicorn idf_trains.main:app            # -> http://localhost:8000
 | GET / PATCH / DELETE | `/itineraries/saved/{id}` | Détail / modifier (partiel : `name`, `origin`, `destination`, `schedule`) / supprimer |
 | GET | `/itineraries/saved/{id}/next` | Calculer un itinéraire sauvegardé (son horaire enregistré par défaut) |
 | GET | `/usage?days=30` | Consommation des API IDFM : appels, quotas, cache, erreurs |
-| GET | `/home` | Éléments de la page d'accueil (trajets et itinéraires choisis, dans l'ordre) |
-| PUT | `/home` | Choisir les éléments de l'accueil `{"items": [{"kind": "journey" \| "itinerary", "id"}]}` |
+| GET | `/home` | Groupes de la page d'accueil, chacun avec ses trajets et itinéraires (dans l'ordre) |
+| POST | `/home/groups` | Créer un groupe `{"name", "items"?: [{"kind": "journey" \| "itinerary", "id"}]}` |
+| PATCH / DELETE | `/home/groups/{id}` | Renommer et/ou choisir les éléments (partiel : `name`, `items`) / supprimer (409 pour le dernier groupe) |
 | GET | `/health` | Healthcheck |
 
 Exemple : `GET /stations/45102/departures?line=A`
@@ -199,11 +200,11 @@ arrêts desservis, retard temps réel, tracé GeoJSON).
 **Itinéraires sauvegardés** : `POST /itineraries/saved` prend les lieux tels que renvoyés par `/places`, et un horaire
 par défaut facultatif : `"schedule": {"mode": "now" | "departure" | "arrival", "date": "AAAA-MM-JJ" | null, "time": "HH:MM" | null}`
 (mêmes règles que `/itineraries` : sans date, aujourd'hui, ou demain si l'heure est passée). `PATCH` ne modifie que
-les champs envoyés : changer l'horaire ou les lieux d'un itinéraire existant ne crée pas de doublon. Un 409 n'est
-renvoyé que si **un autre** itinéraire relie déjà ces deux lieux. `/itineraries/saved/{id}/next` applique l'horaire
+les champs envoyés. Un même couple départ/arrivée peut être sauvegardé **plusieurs fois avec des horaires
+différents** (ex. aller à 8h, retour à 18h) ; un 409 n'est renvoyé que si **un autre** itinéraire a déjà les mêmes
+lieux et le même horaire (mode, date, heure). `/itineraries/saved/{id}/next` applique l'horaire
 enregistré, sauf si la requête précise `date`, `time` ou `datetime`. Les bases existantes sont migrées automatiquement. Ils sont
-stockés en entier (nom, type, coordonnées) dans la base SQLite. Un même couple départ/arrivée n'est sauvegardé qu'une
-fois (409). « Ma position » (type `position`) est refusée (422), car elle change à chaque utilisation.
+stockés en entier (nom, type, coordonnées) dans la base SQLite. « Ma position » (type `position`) est refusée (422), car elle change à chaque utilisation.
 
 **Quota et cache des adresses** : les jetons PRIM récents sont limités à **1 000 requêtes/jour** sur cette API.
 

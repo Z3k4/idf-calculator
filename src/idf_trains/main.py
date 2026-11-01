@@ -16,9 +16,12 @@ from .models import (
     JourneyNextResponse,
     Place,
     ApiUsageToday,
+    HomeGroup,
+    HomeGroupCreate,
+    HomeGroupUpdate,
     HomeItem,
+    HomeItemRef,
     HomeResponse,
-    HomeUpdate,
     SavedItinerary,
     ItinerarySchedule,
     SavedItineraryCreate,
@@ -47,7 +50,9 @@ from .stations import StationRepository
 from .storage import (
     DuplicateItineraryError,
     DuplicateJourneyError,
+    HomeGroupRow,
     HomeStore,
+    LastGroupError,
     ItineraryRow,
     ItineraryStore,
     JourneyRow,
@@ -726,41 +731,111 @@ def _home_items(
     return items
 
 
-@app.get("/home", response_model=HomeResponse, summary="Éléments de la page d'accueil", tags=["accueil"])
-def get_home(
-    home: HomeStore = Depends(get_home_store),
-    journeys: JourneyStore = Depends(get_store),
-    itineraries: ItineraryStore = Depends(get_itinerary_store),
-    repo: StationRepository = Depends(get_repo),
-):
-    return HomeResponse(items=_home_items(home.list(), journeys, itineraries, repo))
+class HomeResolver:
+    """Résout les références des groupes de l'accueil en trajets et itinéraires complets."""
+
+    def __init__(
+        self,
+        journeys: JourneyStore = Depends(get_store),
+        itineraries: ItineraryStore = Depends(get_itinerary_store),
+        repo: StationRepository = Depends(get_repo),
+    ):
+        self.journeys, self.itineraries, self.repo = journeys, itineraries, repo
+
+    def group(self, row: HomeGroupRow) -> HomeGroup:
+        return HomeGroup(
+            id=row.id, name=row.name, items=_home_items(row.items, self.journeys, self.itineraries, self.repo)
+        )
+
+    def validate(self, items: list[HomeItemRef]) -> list[tuple[str, int]]:
+        """Vérifie que les éléments existent ; les doublons sont ignorés."""
+        refs: list[tuple[str, int]] = []
+        for item in items:
+            ref = (item.kind, item.id)
+            if ref in refs:
+                continue
+            exists = self.journeys.get(item.id) if item.kind == "journey" else self.itineraries.get(item.id)
+            if exists is None:
+                label = "Trajet" if item.kind == "journey" else "Itinéraire"
+                raise HTTPException(422, f"{label} inconnu : {item.id}")
+            refs.append(ref)
+        return refs
 
 
-@app.put(
+def _group_name(name: str) -> str:
+    cleaned = name.strip()
+    if not cleaned:
+        raise HTTPException(422, "Le nom du groupe ne peut pas être vide")
+    return cleaned
+
+
+def get_home_group_or_404(group_id: int, home: HomeStore = Depends(get_home_store)) -> HomeGroupRow:
+    row = home.get_group(group_id)
+    if row is None:
+        raise HTTPException(404, f"Groupe inconnu : {group_id}")
+    return row
+
+
+@app.get(
     "/home",
     response_model=HomeResponse,
-    summary="Choisir les trajets et itinéraires de la page d'accueil (dans l'ordre)",
+    summary="Groupes de la page d'accueil et leurs éléments",
     tags=["accueil"],
 )
-def update_home(
-    body: HomeUpdate,
-    home: HomeStore = Depends(get_home_store),
-    journeys: JourneyStore = Depends(get_store),
-    itineraries: ItineraryStore = Depends(get_itinerary_store),
-    repo: StationRepository = Depends(get_repo),
+def get_home(home: HomeStore = Depends(get_home_store), resolver: HomeResolver = Depends()):
+    return HomeResponse(groups=[resolver.group(g) for g in home.list_groups()])
+
+
+@app.post(
+    "/home/groups",
+    response_model=HomeGroup,
+    status_code=201,
+    summary="Créer un groupe sur la page d'accueil",
+    tags=["accueil"],
+)
+def create_home_group(
+    body: HomeGroupCreate, home: HomeStore = Depends(get_home_store), resolver: HomeResolver = Depends()
 ):
-    refs: list[tuple[str, int]] = []
-    for item in body.items:
-        ref = (item.kind, item.id)
-        if ref in refs:
-            continue  # doublon ignoré
-        exists = journeys.get(item.id) if item.kind == "journey" else itineraries.get(item.id)
-        if exists is None:
-            label = "Trajet" if item.kind == "journey" else "Itinéraire"
-            raise HTTPException(422, f"{label} inconnu : {item.id}")
-        refs.append(ref)
-    home.replace(refs)
-    return HomeResponse(items=_home_items(refs, journeys, itineraries, repo))
+    name = _group_name(body.name)
+    refs = resolver.validate(body.items)
+    row = home.create_group(name)
+    home.replace_items(row.id, refs)
+    return resolver.group(home.get_group(row.id))  # type: ignore[arg-type]
+
+
+@app.patch(
+    "/home/groups/{group_id}",
+    response_model=HomeGroup,
+    summary="Renommer un groupe ou choisir ses trajets et itinéraires (dans l'ordre)",
+    tags=["accueil"],
+)
+def update_home_group(
+    body: HomeGroupUpdate,
+    group: HomeGroupRow = Depends(get_home_group_or_404),
+    home: HomeStore = Depends(get_home_store),
+    resolver: HomeResolver = Depends(),
+):
+    if body.name is not None:
+        home.rename_group(group.id, _group_name(body.name))
+    if body.items is not None:
+        home.replace_items(group.id, resolver.validate(body.items))
+    return resolver.group(home.get_group(group.id))  # type: ignore[arg-type]
+
+
+@app.delete(
+    "/home/groups/{group_id}",
+    status_code=204,
+    summary="Supprimer un groupe de la page d'accueil",
+    tags=["accueil"],
+)
+def delete_home_group(
+    group: HomeGroupRow = Depends(get_home_group_or_404), home: HomeStore = Depends(get_home_store)
+):
+    try:
+        home.delete_group(group.id)
+    except LastGroupError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return Response(status_code=204)
 
 
 # --- Suivi de la consommation des API IDFM ------------------------------------------------

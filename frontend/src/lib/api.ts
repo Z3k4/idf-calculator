@@ -284,7 +284,22 @@ export interface HomeItem {
   itinerary: SavedItinerary | null;
 }
 
-export const getHome = () => get<{ items: HomeItem[] }>('/home');
+export type HomeItemRef = { kind: HomeItem['kind']; id: number };
 
-export const updateHome = (items: { kind: HomeItem['kind']; id: number }[]) =>
-  send<{ items: HomeItem[] }>('PUT', '/home', { items });
+/** Groupe de l'accueil (il en existe toujours au moins un). */
+export interface HomeGroup {
+  id: number;
+  name: string;
+  items: HomeItem[];
+}
+
+export const getHome = () => get<{ groups: HomeGroup[] }>('/home');
+
+export const createHomeGroup = (name: string, items: HomeItemRef[] = []) =>
+  send<HomeGroup>('POST', '/home/groups', { name, items });
+
+/** Mise à jour partielle : nom et/ou éléments affichés (dans l'ordre). */
+export const updateHomeGroup = (id: number, changes: Partial<{ name: string; items: HomeItemRef[] }>) =>
+  send<HomeGroup>('PATCH', `/home/groups/${id}`, changes);
+
+export const deleteHomeGroup = (id: number) => send<void>('DELETE', `/home/groups/${id}`);

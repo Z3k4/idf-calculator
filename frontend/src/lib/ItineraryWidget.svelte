@@ -1,6 +1,6 @@
 <script lang="ts">
   import { getItineraries, type Itinerary, type SavedItinerary } from './api';
-  import { fmtTime, journeyTitle } from './format';
+  import { fmtTime, journeyTitle, scheduleLabel } from './format';
   import TransitBadge from './TransitBadge.svelte';
 
   /**
@@ -49,12 +49,8 @@
       <span class="kind">Itinéraire</span>
       <strong>{journeyTitle(itinerary)}</strong>
       {#if itinerary.name}<small>{itinerary.origin.name} → {itinerary.destination.name}</small>{/if}
-      {#if itinerary.schedule.mode !== 'now'}
-        <small class="sched">
-          {itinerary.schedule.mode === 'arrival' ? 'Arrivée' : 'Départ'}
-          {itinerary.schedule.date ? `le ${itinerary.schedule.date.split('-').reverse().join('/')}` : ''}
-          {itinerary.schedule.time ? `à ${itinerary.schedule.time.replace(':', 'h')}` : ''}
-        </small>
+      {#if scheduleLabel(itinerary.schedule)}
+        <small class="sched">{scheduleLabel(itinerary.schedule)}</small>
       {/if}
     </a>
     <button class="refresh" onclick={load} disabled={loading} aria-label="Recalculer" title="Recalculer">

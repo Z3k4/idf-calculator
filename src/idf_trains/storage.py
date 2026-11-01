@@ -124,10 +124,11 @@ CREATE TABLE IF NOT EXISTS saved_itineraries (
     -- Horaire par défaut : now | departure | arrival, avec date (AAAA-MM-JJ) et heure (HH:MM) facultatives
     schedule_mode  TEXT NOT NULL DEFAULT 'now',
     schedule_date  TEXT,
-    schedule_time  TEXT,
-    UNIQUE (origin_id, destination_id)
+    schedule_time  TEXT
 );
 """
+# Un même départ/arrivée peut être sauvegardé plusieurs fois, avec des horaires différents :
+# l'unicité porte sur (départ, arrivée, horaire) et est vérifiée par ItineraryStore._check_unique.
 
 # Colonnes ajoutées après la première version : migrées automatiquement sur les bases existantes
 ITINERARY_MIGRATIONS = {
@@ -139,7 +140,7 @@ ITINERARY_MIGRATIONS = {
 
 class DuplicateItineraryError(Exception):
     def __init__(self, existing_id: int):
-        super().__init__(f"Itinéraire déjà sauvegardé (id {existing_id})")
+        super().__init__(f"Itinéraire déjà sauvegardé avec cet horaire (id {existing_id})")
         self.existing_id = existing_id
 
 
@@ -177,6 +178,24 @@ class ItineraryStore(SQLiteStore):
             for column, ddl in ITINERARY_MIGRATIONS.items():
                 if column not in columns:
                     db.execute(ddl)
+            self._drop_pair_unique_constraint(db)
+
+    @staticmethod
+    def _drop_pair_unique_constraint(db) -> None:
+        """Anciennes bases : retire la contrainte UNIQUE (origin_id, destination_id) en recréant la table."""
+        sql = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'saved_itineraries'"
+        ).fetchone()["sql"]
+        if "UNIQUE" not in sql.upper():
+            return
+        cols = (
+            "id, name, origin_id, destination_id, origin, destination, created_at, "
+            "schedule_mode, schedule_date, schedule_time"
+        )
+        db.execute("ALTER TABLE saved_itineraries RENAME TO saved_itineraries_old")
+        db.execute(ITINERARY_SCHEMA)
+        db.execute(f"INSERT INTO saved_itineraries ({cols}) SELECT {cols} FROM saved_itineraries_old")
+        db.execute("DROP TABLE saved_itineraries_old")
 
     def list(self) -> list[ItineraryRow]:
         with self._connect() as db:
@@ -189,10 +208,14 @@ class ItineraryStore(SQLiteStore):
         return _itinerary_row(r) if r else None
 
     @staticmethod
-    def _check_unique(db, origin_id: str, destination_id: str, exclude_id: int | None = None) -> None:
+    def _check_unique(
+        db, origin_id: str, destination_id: str, schedule: dict, exclude_id: int | None = None
+    ) -> None:
+        """Refuse un doublon exact : mêmes lieux et même horaire (mode, date, heure)."""
         existing = db.execute(
-            "SELECT id FROM saved_itineraries WHERE origin_id = ? AND destination_id = ? AND id IS NOT ?",
-            (origin_id, destination_id, exclude_id),
+            "SELECT id FROM saved_itineraries WHERE origin_id = ? AND destination_id = ? "
+            "AND schedule_mode = ? AND schedule_date IS ? AND schedule_time IS ? AND id IS NOT ?",
+            (origin_id, destination_id, schedule["mode"], schedule["date"], schedule["time"], exclude_id),
         ).fetchone()
         if existing:
             raise DuplicateItineraryError(existing["id"])
@@ -202,7 +225,7 @@ class ItineraryStore(SQLiteStore):
     ) -> ItineraryRow:
         schedule = schedule or NO_SCHEDULE
         with self._connect() as db:
-            self._check_unique(db, origin["id"], destination["id"])
+            self._check_unique(db, origin["id"], destination["id"], schedule)
             cur = db.execute(
                 "INSERT INTO saved_itineraries (name, origin_id, destination_id, origin, destination, "
                 "created_at, schedule_mode, schedule_date, schedule_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -231,7 +254,7 @@ class ItineraryStore(SQLiteStore):
         schedule = changes.get("schedule", current.schedule)
         name = changes["name"] if "name" in changes else current.name
         with self._connect() as db:
-            self._check_unique(db, origin["id"], destination["id"], exclude_id=itinerary_id)
+            self._check_unique(db, origin["id"], destination["id"], schedule, exclude_id=itinerary_id)
             db.execute(
                 "UPDATE saved_itineraries SET name = ?, origin_id = ?, destination_id = ?, origin = ?, "
                 "destination = ?, schedule_mode = ?, schedule_date = ?, schedule_time = ? WHERE id = ?",
@@ -411,37 +434,117 @@ class UsageStore(SQLiteStore):
             db.execute("DELETE FROM cache_hits WHERE day < ?", (before_day,))
 
 
-# --- Page d'accueil : éléments choisis et leur ordre -------------------------------------
+# --- Page d'accueil : groupes, éléments choisis et leur ordre ------------------------------
 
 HOME_SCHEMA = """
+CREATE TABLE IF NOT EXISTS home_groups (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    name     TEXT NOT NULL,
+    position INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS home_items (
+    group_id INTEGER NOT NULL REFERENCES home_groups (id) ON DELETE CASCADE,
     kind     TEXT NOT NULL CHECK (kind IN ('journey', 'itinerary')),
     ref_id   INTEGER NOT NULL,
     position INTEGER NOT NULL,
-    PRIMARY KEY (kind, ref_id)
+    PRIMARY KEY (group_id, kind, ref_id)
 );
 """
 
+DEFAULT_GROUP_NAME = "Accueil"
+
+
+@dataclass
+class HomeGroupRow:
+    id: int
+    name: str
+    items: list[tuple[str, int]]
+
+
+class LastGroupError(Exception):
+    pass
+
 
 class HomeStore(SQLiteStore):
-    """Trajets et itinéraires sauvegardés affichés sur la page d'accueil, dans l'ordre choisi."""
+    """Groupes de la page d'accueil, chacun avec ses trajets et itinéraires dans l'ordre choisi.
 
-    SCHEMA = HOME_SCHEMA
+    Il existe toujours au moins un groupe : le premier est créé automatiquement et le dernier
+    ne peut pas être supprimé.
+    """
 
-    def list(self) -> list[tuple[str, int]]:
+    def __init__(self, path: Path | str):
+        super().__init__(path)
         with self._connect() as db:
-            rows = db.execute("SELECT kind, ref_id FROM home_items ORDER BY position").fetchall()
-        return [(r["kind"], r["ref_id"]) for r in rows]
+            self._migrate(db)
+            db.executescript(HOME_SCHEMA)
+            if db.execute("SELECT COUNT(*) FROM home_groups").fetchone()[0] == 0:
+                db.execute("INSERT INTO home_groups (name, position) VALUES (?, 0)", (DEFAULT_GROUP_NAME,))
 
-    def replace(self, items: list[tuple[str, int]]) -> None:
-        """Remplace toute la sélection (dans une seule transaction)."""
+    @staticmethod
+    def _migrate(db) -> None:
+        """Anciennes bases (une seule sélection, sans groupe) : les éléments vont dans le groupe par défaut."""
+        columns = {r["name"] for r in db.execute("PRAGMA table_info(home_items)")}
+        if not columns or "group_id" in columns:
+            return
+        db.execute("ALTER TABLE home_items RENAME TO home_items_old")
+        for statement in HOME_SCHEMA.split(";"):
+            if statement.strip():
+                db.execute(statement)
+        cur = db.execute("INSERT INTO home_groups (name, position) VALUES (?, 0)", (DEFAULT_GROUP_NAME,))
+        db.execute(
+            "INSERT INTO home_items (group_id, kind, ref_id, position) "
+            "SELECT ?, kind, ref_id, position FROM home_items_old",
+            (cur.lastrowid,),
+        )
+        db.execute("DROP TABLE home_items_old")
+
+    @contextmanager
+    def _connect(self):
+        with super()._connect() as db:
+            db.execute("PRAGMA foreign_keys = ON")
+            yield db
+
+    def list_groups(self) -> list[HomeGroupRow]:
         with self._connect() as db:
-            db.execute("DELETE FROM home_items")
+            groups = db.execute("SELECT id, name FROM home_groups ORDER BY position, id").fetchall()
+            items = db.execute("SELECT group_id, kind, ref_id FROM home_items ORDER BY group_id, position").fetchall()
+        by_group: dict[int, list[tuple[str, int]]] = {}
+        for r in items:
+            by_group.setdefault(r["group_id"], []).append((r["kind"], r["ref_id"]))
+        return [HomeGroupRow(id=g["id"], name=g["name"], items=by_group.get(g["id"], [])) for g in groups]
+
+    def get_group(self, group_id: int) -> HomeGroupRow | None:
+        return next((g for g in self.list_groups() if g.id == group_id), None)
+
+    def create_group(self, name: str) -> HomeGroupRow:
+        with self._connect() as db:
+            position = db.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM home_groups").fetchone()[0]
+            group_id = db.execute(
+                "INSERT INTO home_groups (name, position) VALUES (?, ?)", (name, position)
+            ).lastrowid
+        return self.get_group(group_id)  # type: ignore[return-value]
+
+    def rename_group(self, group_id: int, name: str) -> None:
+        with self._connect() as db:
+            db.execute("UPDATE home_groups SET name = ? WHERE id = ?", (name, group_id))
+
+    def delete_group(self, group_id: int) -> None:
+        with self._connect() as db:
+            if db.execute("SELECT COUNT(*) FROM home_groups").fetchone()[0] <= 1:
+                raise LastGroupError("Impossible de supprimer le dernier groupe")
+            db.execute("DELETE FROM home_items WHERE group_id = ?", (group_id,))
+            db.execute("DELETE FROM home_groups WHERE id = ?", (group_id,))
+
+    def replace_items(self, group_id: int, items: list[tuple[str, int]]) -> None:
+        """Remplace toute la sélection d'un groupe (dans une seule transaction)."""
+        with self._connect() as db:
+            db.execute("DELETE FROM home_items WHERE group_id = ?", (group_id,))
             db.executemany(
-                "INSERT INTO home_items (kind, ref_id, position) VALUES (?, ?, ?)",
-                [(kind, ref_id, pos) for pos, (kind, ref_id) in enumerate(items)],
+                "INSERT INTO home_items (group_id, kind, ref_id, position) VALUES (?, ?, ?, ?)",
+                [(group_id, kind, ref_id, pos) for pos, (kind, ref_id) in enumerate(items)],
             )
 
     def remove(self, kind: str, ref_id: int) -> None:
+        """Retire un trajet ou itinéraire supprimé de tous les groupes."""
         with self._connect() as db:
             db.execute("DELETE FROM home_items WHERE kind = ? AND ref_id = ?", (kind, ref_id))
