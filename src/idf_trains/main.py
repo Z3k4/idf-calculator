@@ -14,6 +14,8 @@ from .models import (
     ItinerariesResponse,
     JourneyNextResponse,
     Place,
+    SavedItinerary,
+    SavedItineraryCreate,
     SavedJourney,
     SavedJourneyCreate,
     SavedJourneyUpdate,
@@ -30,7 +32,15 @@ from .prim import (
 )
 from .navitia import PLACE_ID, NavitiaClient, NavitiaError, NoSolution
 from .stations import StationRepository
-from .storage import DuplicateJourneyError, JourneyRow, JourneyStore
+from .storage import (
+    DuplicateItineraryError,
+    DuplicateJourneyError,
+    ItineraryRow,
+    ItineraryStore,
+    JourneyRow,
+    JourneyStore,
+    PlaceSearchStore,
+)
 
 
 @asynccontextmanager
@@ -40,6 +50,9 @@ async def lifespan(app: FastAPI):
         async with httpx.AsyncClient(timeout=settings.prim_timeout) as http:
             app.state.repo = StationRepository.from_file(settings.stations_file)
             app.state.store = JourneyStore(settings.db_path)
+            app.state.itinerary_store = ItineraryStore(settings.db_path)
+            place_store = PlaceSearchStore(settings.db_path, max_age=settings.places_db_ttl)
+            place_store.purge()
             app.state.prim = PrimClient(
                 http,
                 settings.prim_api_key,
@@ -55,6 +68,7 @@ async def lifespan(app: FastAPI):
                 cache=cache,
                 places_ttl=settings.places_cache_ttl,
                 journeys_ttl=settings.itineraries_cache_ttl,
+                place_store=place_store,
             )
             yield
     finally:
@@ -84,6 +98,10 @@ def get_store(request: Request) -> JourneyStore:
 
 def get_navitia(request: Request) -> NavitiaClient:
     return request.app.state.navitia
+
+
+def get_itinerary_store(request: Request) -> ItineraryStore:
+    return request.app.state.itinerary_store
 
 
 async def fetch_stop(prim: PrimClient, station_id: str) -> StopMonitoring:
@@ -420,6 +438,17 @@ async def compute_itineraries(
 ):
     origin = _place_id(origin, "de départ")
     destination = _place_id(destination, "d'arrivée")
+    return await run_itineraries(navitia, origin, destination, when, represents, count)
+
+
+async def run_itineraries(
+    navitia: NavitiaClient,
+    origin: str,
+    destination: str,
+    when: datetime | None,
+    represents: str,
+    count: int,
+) -> ItinerariesResponse:
     if origin == destination:
         raise HTTPException(422, "Les lieux de départ et d'arrivée doivent être différents")
     try:
@@ -433,6 +462,115 @@ async def compute_itineraries(
         destination=destination,
         itineraries=itineraries,
         message=None if itineraries else "Aucun itinéraire trouvé.",
+    )
+
+
+# --- Itinéraires sauvegardés ----------------------------------------------------------------
+
+
+def to_saved_itinerary(row: ItineraryRow) -> SavedItinerary:
+    return SavedItinerary(
+        id=row.id,
+        name=row.name,
+        origin=Place(**row.origin),
+        destination=Place(**row.destination),
+        created_at=row.created_at,
+    )
+
+
+def get_saved_itinerary_or_404(
+    itinerary_id: int, store: ItineraryStore = Depends(get_itinerary_store)
+) -> SavedItinerary:
+    row = store.get(itinerary_id)
+    if row is None:
+        raise HTTPException(404, f"Itinéraire inconnu : {itinerary_id}")
+    return to_saved_itinerary(row)
+
+
+@app.get(
+    "/itineraries/saved",
+    response_model=list[SavedItinerary],
+    summary="Itinéraires sauvegardés",
+    tags=["itinéraires"],
+)
+def list_saved_itineraries(store: ItineraryStore = Depends(get_itinerary_store)):
+    return [to_saved_itinerary(r) for r in store.list()]
+
+
+@app.post(
+    "/itineraries/saved",
+    response_model=SavedItinerary,
+    status_code=201,
+    summary="Sauvegarder un itinéraire",
+    tags=["itinéraires"],
+)
+def create_saved_itinerary(
+    body: SavedItineraryCreate, store: ItineraryStore = Depends(get_itinerary_store)
+):
+    if body.origin.id == body.destination.id:
+        raise HTTPException(422, "Les lieux de départ et d'arrivée doivent être différents")
+    try:
+        row = store.create(
+            body.origin.model_dump(), body.destination.model_dump(), _clean_name(body.name)
+        )
+    except DuplicateItineraryError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return to_saved_itinerary(row)
+
+
+@app.get(
+    "/itineraries/saved/{itinerary_id}",
+    response_model=SavedItinerary,
+    summary="Détail d'un itinéraire sauvegardé",
+    tags=["itinéraires"],
+)
+def get_saved_itinerary(itinerary: SavedItinerary = Depends(get_saved_itinerary_or_404)):
+    return itinerary
+
+
+@app.patch(
+    "/itineraries/saved/{itinerary_id}",
+    response_model=SavedItinerary,
+    summary="Renommer un itinéraire sauvegardé",
+    tags=["itinéraires"],
+)
+def rename_saved_itinerary(
+    body: SavedJourneyUpdate,
+    itinerary: SavedItinerary = Depends(get_saved_itinerary_or_404),
+    store: ItineraryStore = Depends(get_itinerary_store),
+):
+    return to_saved_itinerary(store.rename(itinerary.id, _clean_name(body.name)))
+
+
+@app.delete(
+    "/itineraries/saved/{itinerary_id}",
+    status_code=204,
+    summary="Supprimer un itinéraire sauvegardé",
+    tags=["itinéraires"],
+)
+def delete_saved_itinerary(
+    itinerary: SavedItinerary = Depends(get_saved_itinerary_or_404),
+    store: ItineraryStore = Depends(get_itinerary_store),
+):
+    store.delete(itinerary.id)
+    return Response(status_code=204)
+
+
+@app.get(
+    "/itineraries/saved/{itinerary_id}/next",
+    response_model=ItinerariesResponse,
+    summary="Calculer un itinéraire sauvegardé",
+    tags=["itinéraires"],
+)
+async def saved_itinerary_next(
+    itinerary: SavedItinerary = Depends(get_saved_itinerary_or_404),
+    when: datetime | None = Query(None, alias="datetime", description="Par défaut : maintenant"),
+    represents: str = Query("departure", pattern="^(departure|arrival)$"),
+    count: int = Query(3, ge=1, le=6),
+    navitia: NavitiaClient = Depends(get_navitia),
+):
+    return await run_itineraries(
+        navitia, itinerary.origin.id, itinerary.destination.id, when, represents, count
     )
 
 

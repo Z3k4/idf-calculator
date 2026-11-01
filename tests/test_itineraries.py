@@ -4,8 +4,9 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from idf_trains.main import app, get_navitia
+from idf_trains.main import app, get_itinerary_store, get_navitia
 from idf_trains.navitia import PARIS, NavitiaClient, parse_journey, parse_place
+from idf_trains.storage import ItineraryStore, PlaceSearchStore
 
 from navitia_fixtures import PLACES, journeys
 
@@ -46,7 +47,7 @@ def test_parse_journey_with_transfer():
 
 
 @pytest.fixture
-def client():
+def client(tmp_path):
     calls: list[httpx.Request] = []
     state = {"journeys": journeys(BASE), "status": 200}
 
@@ -58,7 +59,9 @@ def client():
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     navitia = NavitiaClient(http, "key", "https://prim.test/navitia")
+    store = ItineraryStore(tmp_path / "it.db")
     app.dependency_overrides[get_navitia] = lambda: navitia
+    app.dependency_overrides[get_itinerary_store] = lambda: store
     with TestClient(app) as c:
         c.calls, c.state = calls, state
         yield c
@@ -143,3 +146,92 @@ def test_missing_api_key():
             assert c.get("/itineraries", params={"from": "a:1", "to": "b:2"}).status_code == 503
     finally:
         app.dependency_overrides.clear()
+
+
+# --- Cache persistant des adresses -------------------------------------------------------
+
+
+def test_place_search_store(tmp_path, monkeypatch):
+    store = PlaceSearchStore(tmp_path / "p.db", max_age=100)
+    assert store.get("rivoli") is None
+    store.set("rivoli", [{"id": "1;2", "name": "Rivoli"}])
+    assert store.get("rivoli") == [{"id": "1;2", "name": "Rivoli"}]
+
+    import idf_trains.storage as storage
+
+    now = storage._now()
+    monkeypatch.setattr(storage, "_now", lambda: now + 101)  # expiré
+    assert store.get("rivoli") is None
+    assert store.purge() == 1
+
+
+def test_places_persistent_cache_survives_restart(tmp_path):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json=PLACES)
+
+    import asyncio
+
+    async def scenario():
+        db = tmp_path / "places.db"
+        first = NavitiaClient(httpx.AsyncClient(transport=httpx.MockTransport(handler)), "key", "https://x", place_store=PlaceSearchStore(db))
+        a = await first.places("12 Rue de Rivoli")
+        # Nouveau client = nouveau cache mémoire (comme après un redémarrage), même base SQLite
+        second = NavitiaClient(httpx.AsyncClient(transport=httpx.MockTransport(handler)), "key", "https://x", place_store=PlaceSearchStore(db))
+        b = await second.places("12  rue de RIVOLI")
+        return a, b
+
+    a, b = asyncio.run(scenario())
+    assert len(calls) == 1
+    assert [p.id for p in a] == [p.id for p in b] and b[0].city == "Paris"
+
+
+# --- Itinéraires sauvegardés -------------------------------------------------------------
+
+RIVOLI = {"id": "2.3522;48.8566", "name": "12 Rue de Rivoli (Paris)", "type": "address", "city": "Paris", "lat": 48.8566, "lon": 2.3522}
+GDL = {"id": "stop_area:IDFM:71517", "name": "Gare de Lyon (Paris)", "type": "stop_area", "city": "Paris"}
+
+
+def test_saved_itineraries_crud(client):
+    assert client.get("/itineraries/saved").json() == []
+
+    resp = client.post("/itineraries/saved", json={"origin": RIVOLI, "destination": GDL, "name": " Boulot "})
+    assert resp.status_code == 201, resp.text
+    saved = resp.json()
+    assert saved["name"] == "Boulot" and saved["origin"]["lat"] == 48.8566
+    assert saved["destination"]["type"] == "stop_area"
+    sid = saved["id"]
+
+    assert client.post("/itineraries/saved", json={"origin": RIVOLI, "destination": GDL}).status_code == 409
+    # Sens inverse : autre itinéraire
+    assert client.post("/itineraries/saved", json={"origin": GDL, "destination": RIVOLI}).status_code == 201
+    assert len(client.get("/itineraries/saved").json()) == 2
+
+    assert client.get(f"/itineraries/saved/{sid}").json()["origin"]["name"] == RIVOLI["name"]
+    assert client.patch(f"/itineraries/saved/{sid}", json={"name": "Travail"}).json()["name"] == "Travail"
+
+    nxt = client.get(f"/itineraries/saved/{sid}/next", params={"datetime": "2026-11-01T08:30", "represents": "arrival"})
+    assert nxt.status_code == 200 and len(nxt.json()["itineraries"]) == 3
+    params = client.calls[-1].url.params
+    assert params["from"] == RIVOLI["id"] and params["to"] == GDL["id"]
+    assert params["datetime"] == "20261101T083000" and params["datetime_represents"] == "arrival"
+
+    assert client.delete(f"/itineraries/saved/{sid}").status_code == 204
+    assert client.get(f"/itineraries/saved/{sid}").status_code == 404
+    assert client.get(f"/itineraries/saved/{sid}/next").status_code == 404
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"origin": RIVOLI, "destination": RIVOLI},
+        {"origin": {**RIVOLI, "type": "position"}, "destination": GDL},  # « Ma position » non sauvegardable
+        {"origin": {**RIVOLI, "id": "x y<z>"}, "destination": GDL},
+        {"origin": {**RIVOLI, "name": ""}, "destination": GDL},
+        {"origin": RIVOLI},
+    ],
+)
+def test_saved_itineraries_validation(client, body):
+    assert client.post("/itineraries/saved", json=body).status_code == 422

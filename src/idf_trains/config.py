@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     # Cache Navitia (secondes) : le quota des jetons récents est de 1 000 requêtes/jour
     places_cache_ttl: float = 86400.0
     itineraries_cache_ttl: float = 60.0
+    # Cache persistant (SQLite) des recherches d'adresses : 30 jours
+    places_db_ttl: float = 30 * 86400.0
     # Cache des réponses PRIM par gare (secondes) :
     # - cache_ttl : durée pendant laquelle la réponse est servie sans rappeler PRIM
     # - cache_stale_ttl : durée max pendant laquelle elle sert de secours si PRIM est en erreur

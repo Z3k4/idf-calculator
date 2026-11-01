@@ -5,6 +5,7 @@ Référence du format : https://doc.navitia.io (endpoints /places et /journeys).
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import datetime
 from typing import Any
@@ -15,6 +16,7 @@ import httpx
 from .cache import Cache, MemoryCache
 from .models import Itinerary, ItinerarySection, Place, TransitLine
 from .prim import PrimConfigError, PrimError
+from .storage import PlaceSearchStore
 
 PARIS = ZoneInfo("Europe/Paris")
 NAVITIA_DT = "%Y%m%dT%H%M%S"
@@ -45,6 +47,7 @@ class NavitiaClient:
         cache: Cache | None = None,
         places_ttl: float = 86400.0,
         journeys_ttl: float = 60.0,
+        place_store: PlaceSearchStore | None = None,
     ):
         self.http = http
         self.api_key = api_key
@@ -52,11 +55,16 @@ class NavitiaClient:
         self.cache: Cache = cache if cache is not None else MemoryCache()
         self.places_ttl = places_ttl
         self.journeys_ttl = journeys_ttl
+        # Cache persistant (SQLite) des recherches d'adresses, consulté après le cache mémoire
+        self.place_store = place_store
 
-    async def _get(self, path: str, params: list[tuple[str, str]], cache_key: str, ttl: float) -> dict:
-        cached = await self.cache.get(cache_key)
-        if cached is not None:
-            return cached
+    async def _get(
+        self, path: str, params: list[tuple[str, str]], cache_key: str | None = None, ttl: float = 0
+    ) -> dict:
+        if cache_key:
+            cached = await self.cache.get(cache_key)
+            if cached is not None:
+                return cached
         if not self.api_key:
             raise PrimConfigError("Clé API PRIM manquante (variable IDF_PRIM_API_KEY)")
 
@@ -84,14 +92,31 @@ class NavitiaClient:
         if resp.status_code != 200:
             raise NavitiaError(f"Le calculateur IDFM a répondu {resp.status_code}")
 
-        await self.cache.set(cache_key, data, ttl)
+        if cache_key:
+            await self.cache.set(cache_key, data, ttl)
         return data
 
     async def places(self, query: str, count: int = 8) -> list[Place]:
-        q = " ".join(query.lower().split())
+        """Recherche de lieux : cache mémoire, puis cache SQLite, puis appel IDFM."""
+        q = normalize_query(query)
+        key = f"{count}:{q}"
+        cached = await self.cache.get(f"navitia:places:{key}")
+        if cached is None and self.place_store is not None:
+            cached = await asyncio.to_thread(self.place_store.get, key)
+            if cached is not None:
+                await self.cache.set(f"navitia:places:{key}", cached, self.places_ttl)
+        if cached is not None:
+            return [Place(**p) for p in cached]
+
         params = [("q", q), ("count", str(count))] + [("type[]", t) for t in PLACE_TYPES]
-        data = await self._get("places", params, f"navitia:places:{count}:{q}", self.places_ttl)
-        return [p for item in data.get("places", []) if (p := parse_place(item))]
+        data = await self._get("places", params)
+        places = [p for item in data.get("places", []) if (p := parse_place(item))]
+
+        dumped = [p.model_dump() for p in places]
+        await self.cache.set(f"navitia:places:{key}", dumped, self.places_ttl)
+        if self.place_store is not None:
+            await asyncio.to_thread(self.place_store.set, key, dumped)
+        return places
 
     async def journeys(
         self,
@@ -113,6 +138,11 @@ class NavitiaClient:
         key = "navitia:journeys:" + "&".join(f"{k}={v}" for k, v in params)
         data = await self._get("journeys", params, key, self.journeys_ttl)
         return [parse_journey(j) for j in data.get("journeys", [])]
+
+
+def normalize_query(query: str) -> str:
+    """« 12  Rue de RIVOLI » et « 12 rue de rivoli » partagent la même entrée de cache."""
+    return " ".join(query.lower().split())
 
 
 def _error(error: dict) -> NavitiaError:

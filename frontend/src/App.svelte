@@ -6,6 +6,7 @@
   import StationSearch from './lib/StationSearch.svelte';
   import ItineraryPlanner from './pages/ItineraryPlanner.svelte';
   import JourneyPlanner from './pages/JourneyPlanner.svelte';
+  import SavedItineraryDetail from './pages/SavedItineraryDetail.svelte';
   import SavedJourneyDetail from './pages/SavedJourneyDetail.svelte';
   import SavedJourneys from './pages/SavedJourneys.svelte';
 
@@ -40,7 +41,8 @@
     | { name: 'planner'; from: string | null; to: string | null }
     | { name: 'itinerary'; from: Place | null; to: Place | null; mode: 'now' | 'departure' | 'arrival'; when: string | null }
     | { name: 'journeys' }
-    | { name: 'journey'; id: number };
+    | { name: 'journey'; id: number }
+    | { name: 'savedItinerary'; id: number };
 
   let page = $state<Page>({ name: 'home' });
 
@@ -61,6 +63,8 @@
     if (path === '/trajets') return { name: 'journeys' };
     const m = path.match(/^\/trajets\/(\d+)$/);
     if (m) return { name: 'journey', id: Number(m[1]) };
+    const mi = path.match(/^\/itineraires\/(\d+)$/);
+    if (mi) return { name: 'savedItinerary', id: Number(mi[1]) };
     return { name: 'home' };
   }
 
@@ -107,7 +111,7 @@
 
   $effect(() => {
     const titles: Record<string, string> = { planner: 'Trajet direct', journeys: 'Mes trajets', itinerary: 'Itinéraire' };
-    if (page.name === 'journey') return; // titre fixé par la page du trajet
+    if (page.name === 'journey' || page.name === 'savedItinerary') return; // titre fixé par la page
     const title = page.name === 'home' ? station?.name : titles[page.name];
     document.title = title ? `${title} · Prochains trains` : 'Prochains trains IDF';
   });
@@ -124,7 +128,7 @@
         <a href="#/" class:active={page.name === 'home'}>Départs</a>
         <a href="#/itineraire" class:active={page.name === 'itinerary'}>Itinéraire</a>
         <a href="#/trajet" class:active={page.name === 'planner'}>Trajet</a>
-        <a href="#/trajets" class:active={page.name === 'journeys' || page.name === 'journey'}>Mes trajets</a>
+        <a href="#/trajets" class:active={page.name === 'journeys' || page.name === 'journey' || page.name === 'savedItinerary'}>Mes trajets</a>
       </nav>
     </div>
   </header>
@@ -136,6 +140,8 @@
     <JourneyPlanner fromId={page.from} toId={page.to} />
   {:else if page.name === 'journeys'}
     <SavedJourneys />
+  {:else if page.name === 'savedItinerary'}
+    <SavedItineraryDetail id={page.id} />
   {:else if page.name === 'journey'}
     <SavedJourneyDetail id={page.id} />
   {:else}

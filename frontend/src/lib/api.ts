@@ -211,3 +211,23 @@ export function getItineraries(
   }
   return get<ItinerariesResponse>('/itineraries', params);
 }
+
+export interface SavedItinerary {
+  id: number;
+  name: string | null;
+  origin: Place;
+  destination: Place;
+  created_at: string;
+}
+
+export const listSavedItineraries = () => get<SavedItinerary[]>('/itineraries/saved');
+
+export const getSavedItinerary = (id: number) => get<SavedItinerary>(`/itineraries/saved/${id}`);
+
+export const createSavedItinerary = (origin: Place, destination: Place, name: string | null) =>
+  send<SavedItinerary>('POST', '/itineraries/saved', { origin, destination, name });
+
+export const renameSavedItinerary = (id: number, name: string | null) =>
+  send<SavedItinerary>('PATCH', `/itineraries/saved/${id}`, { name });
+
+export const deleteSavedItinerary = (id: number) => send<void>('DELETE', `/itineraries/saved/${id}`);

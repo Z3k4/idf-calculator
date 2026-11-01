@@ -1,5 +1,6 @@
 <script lang="ts">
   import { searchPlaces, type Place } from './api';
+  import { forgetPlace, loadRecentPlaces, matchRecent, rememberPlace } from './recentPlaces';
 
   let {
     label,
@@ -32,6 +33,19 @@
   let open = $state(false);
   let locating = $state(false);
   let input = $state<HTMLInputElement>();
+  let recent = $state<Place[]>(loadRecentPlaces());
+
+  // Suggestions : adresses déjà utilisées (locales, sans appel API) puis résultats de l'API
+  const options = $derived.by(() => {
+    const q = query.trim();
+    if (q.length < 3) return recent.map((p) => ({ place: p, recent: true }));
+    const local = matchRecent(recent, q);
+    const ids = new Set(local.map((p) => p.id));
+    return [
+      ...local.map((p) => ({ place: p, recent: true })),
+      ...results.filter((p) => !ids.has(p.id)).map((p) => ({ place: p, recent: false })),
+    ];
+  });
 
   // Anti-rebond plus long que pour les gares : chaque appel consomme le quota de l'API IDFM
   $effect(() => {
@@ -66,6 +80,7 @@
   });
 
   function choose(p: Place) {
+    recent = rememberPlace(p);
     place = p;
     query = '';
     results = [];
@@ -93,23 +108,30 @@
     );
   }
 
+  function forget(e: MouseEvent, id: string) {
+    e.stopPropagation();
+    recent = forgetPlace(id);
+    input?.focus();
+  }
+
   function onkeydown(e: KeyboardEvent) {
-    if (!results.length) return;
+    if (!options.length) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      active = (active + 1) % results.length;
+      active = (active + 1) % options.length;
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      active = (active - 1 + results.length) % results.length;
+      active = (active - 1 + options.length) % options.length;
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      choose(results[active]);
+      choose(options[active].place);
     } else if (e.key === 'Escape') {
       open = false;
     }
   }
 
-  const showList = $derived(open && (query.trim().length >= 3 || !!error));
+  const showList = $derived(open && (query.trim().length >= 3 || !!error || options.length > 0));
+  const showingRecentOnly = $derived(query.trim().length < 3);
 </script>
 
 <div class="picker">
@@ -155,23 +177,33 @@
         <ul id="{uid}-results" class="results" role="listbox">
           {#if error}
             <li class="empty error">{error}</li>
-          {:else if !results.length && !loading}
+          {:else if !options.length && !loading}
             <li class="empty">Aucun résultat pour « {query.trim()} »</li>
           {/if}
-          {#each results as p, i (p.id)}
-            <li role="option" aria-selected={i === active}>
+          {#if showingRecentOnly && options.length}
+            <li class="heading" role="presentation">Adresses récentes</li>
+          {/if}
+          {#each options as { place: p, recent: isRecent }, i (p.id)}
+            <li role="option" aria-selected={i === active} class="option">
               <button
                 type="button"
                 class:active={i === active}
                 onmouseenter={() => (active = i)}
                 onclick={() => choose(p)}
               >
-                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d={ICONS[p.type] ?? ICONS.address} /></svg>
+                {#if isRecent}
+                  <svg class="icon recent" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
+                {:else}
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d={ICONS[p.type] ?? ICONS.address} /></svg>
+                {/if}
                 <span class="name">
                   <strong>{p.name}</strong>
                   {#if p.city && !p.name.includes(p.city)}<small>{p.city}</small>{/if}
                 </span>
               </button>
+              {#if isRecent}
+                <button type="button" class="forget" onclick={(e) => forget(e, p.id)} aria-label="Oublier {p.name}" title="Oublier">×</button>
+              {/if}
             </li>
           {/each}
         </ul>
@@ -331,6 +363,33 @@
   }
   .results button.active {
     background: var(--hover);
+  }
+  .option {
+    display: flex;
+    align-items: center;
+  }
+  .heading {
+    padding: 0.4rem 0.75rem 0.2rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+  }
+  .results .forget {
+    width: 2rem;
+    height: 2rem;
+    flex-shrink: 0;
+    justify-content: center;
+    padding: 0;
+    color: var(--muted);
+    font-size: 1.1rem;
+  }
+  .results .forget:hover {
+    color: var(--danger);
+  }
+  .icon.recent {
+    stroke: var(--muted);
   }
   .empty {
     padding: 0.75rem;

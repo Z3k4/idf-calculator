@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -159,3 +160,28 @@ class ItinerariesResponse(BaseModel):
     destination: str
     itineraries: list[Itinerary]
     message: str | None = None
+
+
+class PlaceInput(BaseModel):
+    """Lieu tel que renvoyé par /places, envoyé par le client pour sauvegarder un itinéraire."""
+
+    id: str = Field(..., pattern=r"^[\w:;.\-]{1,200}$")
+    name: str = Field(..., min_length=1, max_length=200)
+    type: Literal["address", "stop_area", "poi", "administrative_region"]
+    city: str | None = Field(None, max_length=120)
+    lat: float | None = Field(None, ge=-90, le=90)
+    lon: float | None = Field(None, ge=-180, le=180)
+
+
+class SavedItineraryCreate(BaseModel):
+    origin: PlaceInput
+    destination: PlaceInput
+    name: str | None = Field(None, max_length=80)
+
+
+class SavedItinerary(BaseModel):
+    id: int
+    name: str | None
+    origin: Place
+    destination: Place
+    created_at: datetime

@@ -1,76 +1,40 @@
 <script lang="ts">
-  import { getItineraries, type ItinerariesResponse, type Place } from '../lib/api';
-  import ItineraryCard from '../lib/ItineraryCard.svelte';
+  import { ApiError, createSavedItinerary, listSavedItineraries, type Place } from '../lib/api';
+  import ItineraryResults from '../lib/ItineraryResults.svelte';
   import PlacePicker from '../lib/PlacePicker.svelte';
-
-  type Mode = 'now' | 'departure' | 'arrival';
+  import TimeChooser, { nowLocal, type TimeMode } from '../lib/TimeChooser.svelte';
 
   let {
     initial,
   }: {
-    initial: { from: Place | null; to: Place | null; mode: Mode; when: string | null };
+    initial: { from: Place | null; to: Place | null; mode: TimeMode; when: string | null };
   } = $props();
-
-  // Valeur pour <input type="datetime-local"> : heure locale, arrondie aux 5 minutes
-  function nowLocal() {
-    const d = new Date();
-    d.setMinutes(Math.ceil(d.getMinutes() / 5) * 5, 0, 0);
-    const pad = (n: number) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  }
 
   // svelte-ignore state_referenced_locally
   let origin = $state<Place | null>(initial.from);
   // svelte-ignore state_referenced_locally
   let destination = $state<Place | null>(initial.to);
   // svelte-ignore state_referenced_locally
-  let mode = $state<Mode>(initial.mode);
+  let mode = $state<TimeMode>(initial.mode);
   // svelte-ignore state_referenced_locally
   let when = $state(initial.when ?? nowLocal());
-  // Heure prise en compte (mise à jour à la validation du champ, pas à chaque frappe)
-  // svelte-ignore state_referenced_locally
-  let committedWhen = $state(when);
 
-  let data = $state<ItinerariesResponse | null>(null);
-  let error = $state<string | null>(null);
-  let loading = $state(false);
-  let openIndex = $state(0);
-  let refreshKey = $state(0);
+  let name = $state('');
+  let saving = $state(false);
+  let saveError = $state<string | null>(null);
+  let existingId = $state<number | null>(null);
 
   const ready = $derived(!!origin && !!destination && origin.id !== destination.id);
+  // « Ma position » change à chaque fois : on ne peut pas la sauvegarder telle quelle
+  const usesPosition = $derived(origin?.type === 'position' || destination?.type === 'position');
 
-  // Recherche automatique quand les lieux ou l'horaire changent (pas de rafraîchissement
-  // périodique : le quota de l'API itinéraire IDFM est limité)
   $effect(() => {
-    const [o, d, m, w] = [origin, destination, mode, committedWhen];
-    refreshKey;
-    syncUrl(o, d, m, w);
-    if (!o || !d || o.id === d.id) {
-      data = null;
-      error = null;
-      return;
-    }
-    let stale = false;
-    loading = true;
-    error = null;
-    getItineraries(o.id, d.id, m === 'now' ? {} : { datetime: w, represents: m })
-      .then((res) => {
-        if (stale) return;
-        data = res;
-        openIndex = 0;
-      })
-      .catch((e) => {
-        if (!stale) error = (e as Error).message;
-      })
-      .finally(() => {
-        if (!stale) loading = false;
-      });
-    return () => {
-      stale = true;
-    };
+    syncUrl(origin, destination, mode, when);
+    saveError = null;
+    existingId = null;
   });
 
-  function syncUrl(o: Place | null, d: Place | null, m: Mode, w: string) {
+  function syncUrl(o: Place | null, d: Place | null, m: TimeMode, w: string) {
     const p = new URLSearchParams();
     if (o) p.set('from', o.id), p.set('fromName', o.name);
     if (d) p.set('to', d.id), p.set('toName', d.name);
@@ -83,9 +47,25 @@
     [origin, destination] = [destination, origin];
   }
 
-  function setMode(m: Mode) {
-    mode = m;
-    if (m !== 'now' && !when) when = committedWhen = nowLocal();
+  async function save(e: SubmitEvent) {
+    e.preventDefault();
+    if (!origin || !destination) return;
+    saving = true;
+    saveError = null;
+    try {
+      const saved = await createSavedItinerary(origin, destination, name.trim() || null);
+      location.hash = `#/itineraires/${saved.id}`;
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        const all = await listSavedItineraries().catch(() => []);
+        existingId = all.find((s) => s.origin.id === origin?.id && s.destination.id === destination?.id)?.id ?? null;
+        saveError = 'Cet itinéraire est déjà sauvegardé.';
+      } else {
+        saveError = (err as Error).message;
+      }
+    } finally {
+      saving = false;
+    }
   }
 </script>
 
@@ -98,62 +78,32 @@
     </button>
     <PlacePicker label="Arrivée" bind:place={destination} autofocus={!!origin && !destination} />
   </div>
-
-  <div class="when">
-    <div class="segmented" role="radiogroup" aria-label="Horaire">
-      {#each [['now', 'Maintenant'], ['departure', 'Partir à'], ['arrival', 'Arriver à']] as [value, label] (value)}
-        <button
-          type="button"
-          role="radio"
-          aria-checked={mode === value}
-          class:on={mode === value}
-          onclick={() => setMode(value as Mode)}
-        >
-          {label}
-        </button>
-      {/each}
-    </div>
-    {#if mode !== 'now'}
-      <input
-        type="datetime-local"
-        bind:value={when}
-        onchange={() => (committedWhen = when)}
-        aria-label="Date et heure"
-      />
-    {/if}
-  </div>
-
+  <TimeChooser bind:mode bind:when />
   {#if origin && destination && origin.id === destination.id}
     <p class="hint error">Choisissez deux lieux différents.</p>
   {/if}
 </section>
 
-{#if ready}
-  <section class="results" aria-busy={loading}>
-    <div class="results-head">
-      <h2>{data?.itineraries.length ?? ''} itinéraire{(data?.itineraries.length ?? 0) > 1 ? 's' : ''}</h2>
-      <button class="refresh" onclick={() => refreshKey++} disabled={loading}>
-        {loading ? 'Recherche…' : 'Actualiser'}
-      </button>
-    </div>
+{#if ready && origin && destination}
+  <ItineraryResults from={origin.id} to={destination.id} {mode} {when} />
 
-    {#if error}
-      <div class="state error">
-        <p>Impossible de calculer l'itinéraire.</p>
-        <small>{error}</small>
-      </div>
-    {:else if !data}
-      {#each Array(3) as _, i (i)}<div class="skeleton"></div>{/each}
-    {:else if !data.itineraries.length}
-      <div class="state">{data.message ?? 'Aucun itinéraire trouvé.'}</div>
+  <form class="card save" onsubmit={save}>
+    {#if usesPosition}
+      <p class="hint">Pour sauvegarder cet itinéraire, remplacez « Ma position » par une adresse.</p>
     {:else}
-      <div class="list" class:dim={loading}>
-        {#each data.itineraries as itinerary, i (i + itinerary.departure)}
-          <ItineraryCard {itinerary} bind:open={() => openIndex === i, (v) => (openIndex = v ? i : -1)} />
-        {/each}
-      </div>
+      <label>
+        <span>Sauvegarder cet itinéraire <small>(nom facultatif)</small></span>
+        <input bind:value={name} maxlength="80" placeholder="ex. Maison → Bureau" />
+      </label>
+      <button type="submit" disabled={saving}>{saving ? 'Sauvegarde…' : 'Sauvegarder'}</button>
     {/if}
-  </section>
+    {#if saveError}
+      <p class="hint error">
+        {saveError}
+        {#if existingId}<a href="#/itineraires/{existingId}">Voir l'itinéraire</a>{/if}
+      </p>
+    {/if}
+  </form>
 {/if}
 
 <style>
@@ -204,108 +154,62 @@
     stroke-linecap: round;
     stroke-linejoin: round;
   }
-  .when {
+  .save {
+    padding: 1rem 1.25rem;
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
-    gap: 0.6rem;
+    align-items: flex-end;
+    gap: 0.75rem;
   }
-  .segmented {
-    display: inline-flex;
-    padding: 0.2rem;
-    background: var(--hover);
-    border-radius: 10px;
-  }
-  .segmented button {
-    border: 0;
-    background: transparent;
-    color: var(--muted);
-    font: inherit;
-    font-size: 0.9rem;
+  .save label {
+    flex: 1 1 240px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
     font-weight: 600;
-    padding: 0.4rem 0.75rem;
-    border-radius: 8px;
-    cursor: pointer;
+    font-size: 0.9rem;
   }
-  .segmented button.on {
-    background: var(--surface);
-    color: var(--text);
-    box-shadow: var(--shadow);
+  .save small {
+    font-weight: 400;
+    color: var(--muted);
   }
-  input[type='datetime-local'] {
+  .save input {
     font: inherit;
-    padding: 0.45rem 0.6rem;
+    font-weight: 400;
+    padding: 0.65rem 0.8rem;
     border: 1px solid var(--border);
     border-radius: 10px;
     background: var(--bg);
     color: var(--text);
-    color-scheme: inherit;
+  }
+  .save input:focus {
+    outline: 0;
+    border-color: var(--accent);
+  }
+  .save button {
+    font: inherit;
+    font-weight: 700;
+    padding: 0.7rem 1.1rem;
+    border: 0;
+    border-radius: 10px;
+    background: var(--accent);
+    color: var(--on-accent);
+    cursor: pointer;
+  }
+  .save button:disabled {
+    opacity: 0.6;
   }
   .hint {
     margin: 0;
+    width: 100%;
+    font-size: 0.9rem;
+    color: var(--muted);
   }
   .error {
     color: var(--danger);
   }
-  .results {
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-  }
-  .results-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-  h2 {
-    margin: 0;
-    font-size: 1rem;
-    color: var(--muted);
-    font-weight: 600;
-  }
-  .refresh {
-    border: 1px solid var(--border);
-    background: var(--surface);
-    color: var(--text);
-    border-radius: 8px;
-    padding: 0.35rem 0.8rem;
-    font: inherit;
-    font-size: 0.9rem;
-    cursor: pointer;
-  }
-  .list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-    transition: opacity 0.2s;
-  }
-  .dim {
-    opacity: 0.55;
-  }
-  .skeleton {
-    height: 6.5rem;
-    border-radius: 16px;
-    background: linear-gradient(90deg, var(--hover), var(--surface), var(--hover));
-    background-size: 200% 100%;
-    animation: shimmer 1.2s infinite;
-  }
-  @keyframes shimmer {
-    to {
-      background-position: -200% 0;
-    }
-  }
-  .state {
-    padding: 2rem 1rem;
-    text-align: center;
-    color: var(--muted);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 16px;
-  }
-  .state.error {
-    color: var(--danger);
-  }
-  .state p {
-    margin: 0 0 0.3rem;
+  .error a {
+    color: var(--accent);
+    margin-left: 0.4rem;
   }
 </style>

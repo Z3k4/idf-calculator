@@ -27,9 +27,10 @@ lien partageable (`#/gare/45102`), thème clair/sombre automatique.
 Pages :
 
 - `#/` : recherche d'une gare et prochains départs ;
-- `#/itineraire` : itinéraire entre deux adresses (autocomplétion, « Ma position », partir/arriver à) ;
+- `#/itineraire` : itinéraire entre deux adresses (autocomplétion, adresses récentes, « Ma position », partir/arriver à, sauvegarde) ;
+- `#/itineraires/{id}` : itinéraire sauvegardé (calcul à la demande, renommer, supprimer, itinéraire retour) ;
 - `#/trajet?from=…&to=…` : choix d'une gare de départ et d'arrivée, prochains trains directs, sauvegarde ;
-- `#/trajets` : trajets sauvegardés avec le prochain train de chacun ;
+- `#/trajets` : itinéraires et trajets directs sauvegardés (avec le prochain train pour les trajets directs) ;
 - `#/trajets/{id}` : détail d'un trajet (renommer, supprimer, trajet retour).
 
 **Développement** (API sur le port 8000, Vite relaie les appels `/stations`) :
@@ -63,6 +64,10 @@ uv run uvicorn idf_trains.main:app            # -> http://localhost:8000
 | GET | `/journeys/{id}/next` | Prochains trains d'un trajet sauvegardé |
 | GET | `/places?q=12 rue de rivoli` | Recherche d'adresse, arrêt, lieu ou commune (calculateur IDFM) |
 | GET | `/itineraries?from=…&to=…` | Itinéraire entre deux lieux (tous modes IDFM) |
+| GET | `/itineraries/saved` | Itinéraires sauvegardés |
+| POST | `/itineraries/saved` | Sauvegarder `{"origin": <lieu>, "destination": <lieu>, "name"?}` |
+| GET / PATCH / DELETE | `/itineraries/saved/{id}` | Détail / renommer `{"name"}` / supprimer |
+| GET | `/itineraries/saved/{id}/next` | Calculer un itinéraire sauvegardé (`datetime`, `represents`, `count`) |
 | GET | `/health` | Healthcheck |
 
 Exemple : `GET /stations/45102/departures?line=A`
@@ -148,9 +153,19 @@ Chaque itinéraire donne les horaires, la durée, le nombre de correspondances, 
 étapes : marche, attente, correspondance et trajets en transport (ligne avec sa couleur officielle, direction,
 arrêts desservis, retard temps réel, tracé GeoJSON).
 
-**Quota** : les jetons PRIM récents sont limités à **1 000 requêtes/jour** sur cette API. Les recherches de lieux sont
-mises en cache 24 h (`IDF_PLACES_CACHE_TTL`) et les itinéraires 60 s (`IDF_ITINERARIES_CACHE_TTL`). Le frontend
-attend une pause dans la frappe avant de chercher une adresse et ne rafraîchit pas les itinéraires automatiquement.
+**Itinéraires sauvegardés** : `POST /itineraries/saved` prend les lieux tels que renvoyés par `/places`. Ils sont
+stockés en entier (nom, type, coordonnées) dans la base SQLite. Un même couple départ/arrivée n'est sauvegardé qu'une
+fois (409). « Ma position » (type `position`) est refusée (422), car elle change à chaque utilisation.
+
+**Quota et cache des adresses** : les jetons PRIM récents sont limités à **1 000 requêtes/jour** sur cette API.
+
+- Recherches d'adresses : cache en mémoire 24 h (`IDF_PLACES_CACHE_TTL`), puis **cache persistant SQLite de 30 jours**
+  (`IDF_PLACES_DB_TTL`, table `place_searches`), conservé après un redémarrage. Les entrées expirées sont purgées au
+  démarrage. Les recherches ne diffèrent que par la casse ou les espaces (« 12  Rue de RIVOLI ») partagent la même entrée.
+- Itinéraires : cache de 60 s (`IDF_ITINERARIES_CACHE_TTL`).
+- Frontend : les adresses déjà choisies sont mémorisées dans le navigateur et proposées dès qu'on clique dans le champ,
+  sans appel à l'API. La recherche attend une pause dans la frappe, et les itinéraires ne se rafraîchissent pas
+  automatiquement.
 
 ### Recherche par nom
 
