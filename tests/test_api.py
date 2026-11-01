@@ -133,3 +133,39 @@ def test_search_endpoint(client):
     resp = client.get("/stations", params={"q": "gare de lyon"})
     assert resp.status_code == 200
     assert resp.json()[0]["id"] == "470195"
+
+
+@pytest.mark.parametrize(
+    "query, expected",
+    [
+        ("Gare de Lyon", "Gare de Lyon"),
+        ("gare de lyn", "Gare de Lyon"),
+        ("chatlet", "Châtelet - Les Halles"),
+        ("la defence", "La Défense"),
+        ("st germain en laye", "Saint-Germain-en-Laye"),
+        ("massy palaiseau", "Massy - Palaiseau"),
+    ],
+)
+def test_search_by_name_fuzzy(repo, query, expected):
+    results = repo.search_by_name(query)
+    assert results and results[0][0].name == expected
+
+
+def test_search_by_name_exact_scores_1(repo):
+    station, score = repo.search_by_name("Juvisy")[0]
+    assert station.name == "Juvisy" and score == 1.0
+
+
+def test_search_by_name_no_match(repo):
+    assert repo.search_by_name("zzzzzz") == []
+
+
+def test_search_by_name_endpoint(client):
+    resp = client.get("/stations/search", params={"name": "gare de lyn", "limit": 3})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body[0]["station"]["id"] == "470195"
+    assert 0 < body[0]["score"] <= 1
+    assert len(body) <= 3
+    # Paramètre obligatoire
+    assert client.get("/stations/search").status_code == 422

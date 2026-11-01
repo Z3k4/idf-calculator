@@ -18,6 +18,11 @@ class Station(BaseModel):
     lines: list[Line]
 
 
+class StationMatch(BaseModel):
+    score: float
+    station: Station
+
+
 class Departure(BaseModel):
     line: Line
     destination: str

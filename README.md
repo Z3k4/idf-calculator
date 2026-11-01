@@ -23,6 +23,7 @@ Documentation interactive : http://localhost:8000/docs
 | Méthode | Route | Description |
 |---|---|---|
 | GET | `/stations?q=chatelet&line=A` | Recherche de gares (accents facultatifs, filtre par ligne) |
+| GET | `/stations/search?name=gare de lyn` | Recherche approximative par nom (fautes tolérées), triée par score |
 | GET | `/stations/{id}` | Détail d'une gare et ses lignes |
 | GET | `/stations/{id}/departures?line=A&limit=10` | Prochains départs en temps réel |
 | GET | `/health` | Healthcheck |
@@ -49,6 +50,17 @@ Exemple : `GET /stations/45102/departures?line=A`
   ]
 }
 ```
+
+### Recherche par nom
+
+`GET /stations/search?name=chatlet&limit=3&min_score=0.65` renvoie les gares les plus proches avec un score de 0 à 1
+(1 = nom exact) :
+
+```json
+[{"score": 0.835, "station": {"id": "45102", "name": "Châtelet - Les Halles", "...": "..."}}]
+```
+
+Accents, ponctuation et mots courants (« gare », « de », « la »…) sont ignorés ; « st »/« ste » valent « saint »/« sainte ».
 
 ## Cache
 

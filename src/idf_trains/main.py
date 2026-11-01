@@ -6,7 +6,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 
 from .cache import create_cache
 from .config import settings
-from .models import DeparturesResponse, Station
+from .models import DeparturesResponse, Station, StationMatch
 from .prim import PrimClient, PrimConfigError, PrimError, parse_departures
 from .stations import StationRepository
 
@@ -67,6 +67,24 @@ async def search_stations(
     repo: StationRepository = Depends(get_repo),
 ):
     return repo.search(q, line=line, limit=limit)
+
+
+# Déclaré avant /stations/{station_id} pour que « search » ne soit pas pris pour un identifiant
+@app.get(
+    "/stations/search",
+    response_model=list[StationMatch],
+    summary="Chercher une gare par nom (recherche approximative)",
+)
+async def search_stations_by_name(
+    name: str = Query(..., min_length=1, description="Nom de la gare, fautes de frappe tolérées"),
+    limit: int = Query(10, ge=1, le=50),
+    min_score: float = Query(0.65, ge=0, le=1, description="Score minimum de pertinence (0 à 1)"),
+    repo: StationRepository = Depends(get_repo),
+):
+    return [
+        StationMatch(score=score, station=station)
+        for station, score in repo.search_by_name(name, limit=limit, min_score=min_score)
+    ]
 
 
 @app.get("/stations/{station_id}", response_model=Station, summary="Détail d'une gare")
