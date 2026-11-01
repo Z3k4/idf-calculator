@@ -235,3 +235,73 @@ def test_saved_itineraries_crud(client):
 )
 def test_saved_itineraries_validation(client, body):
     assert client.post("/itineraries/saved", json=body).status_code == 422
+
+
+# --- Date et heure facultatives ------------------------------------------------------------
+
+FIXED_NOW = datetime(2026, 11, 1, 18, 42, 37, tzinfo=PARIS)
+
+
+@pytest.fixture
+def frozen_now(monkeypatch):
+    import idf_trains.main as main
+
+    monkeypatch.setattr(main, "now_paris", lambda: FIXED_NOW)
+
+
+@pytest.mark.parametrize(
+    "params, expected_navitia, expected_requested",
+    [
+        # Heure seule à venir : aujourd'hui à cette heure
+        ({"time": "20:15"}, "20261101T201500", "2026-11-01T20:15:00+01:00"),
+        # Heure seule égale à l'heure actuelle (à la minute) : aujourd'hui
+        ({"time": "18:42"}, "20261101T184200", "2026-11-01T18:42:00+01:00"),
+        # Heure seule déjà passée : demain
+        ({"time": "08:15"}, "20261102T081500", "2026-11-02T08:15:00+01:00"),
+        ({"time": "18:41"}, "20261102T184100", "2026-11-02T18:41:00+01:00"),
+        # Heure passée mais date explicite : la date est respectée
+        ({"date": "2026-11-01", "time": "08:15"}, "20261101T081500", "2026-11-01T08:15:00+01:00"),
+        # Date seule : ce jour-là à l'heure actuelle (à la minute)
+        ({"date": "2026-11-05"}, "20261105T184200", "2026-11-05T18:42:00+01:00"),
+        # Les deux
+        ({"date": "2026-11-05", "time": "07:30"}, "20261105T073000", "2026-11-05T07:30:00+01:00"),
+    ],
+)
+def test_itineraries_optional_date_and_time(client, frozen_now, params, expected_navitia, expected_requested):
+    resp = client.get("/itineraries", params={"from": "a:1", "to": "b:2", "represents": "arrival", **params})
+    assert resp.status_code == 200, resp.text
+    sent = client.calls[0].url.params
+    assert sent["datetime"] == expected_navitia and sent["datetime_represents"] == "arrival"
+    body = resp.json()
+    assert body["requested_at"] == expected_requested and body["represents"] == "arrival"
+
+
+def test_itineraries_without_date_nor_time_is_now(client, frozen_now):
+    body = client.get("/itineraries", params={"from": "a:1", "to": "b:2", "represents": "arrival"}).json()
+    assert "datetime" not in client.calls[0].url.params
+    assert body["requested_at"] is None and body["represents"] == "departure"
+
+
+def test_itineraries_datetime_and_date_are_exclusive(client):
+    resp = client.get("/itineraries", params={"from": "a:1", "to": "b:2", "datetime": "2026-11-01T08:00", "time": "09:00"})
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("params", [{"time": "25:00"}, {"date": "2026-13-01"}, {"time": "8h"}])
+def test_itineraries_invalid_date_or_time(client, params):
+    assert client.get("/itineraries", params={"from": "a:1", "to": "b:2", **params}).status_code == 422
+
+
+def test_saved_itinerary_accepts_time_only(client, frozen_now):
+    sid = client.post("/itineraries/saved", json={"origin": RIVOLI, "destination": GDL}).json()["id"]
+    resp = client.get(f"/itineraries/saved/{sid}/next", params={"time": "09:00", "represents": "arrival"})
+    assert resp.status_code == 200
+    assert client.calls[-1].url.params["datetime"] == "20261102T090000"  # 9h passée à 18h42 : demain
+
+
+def test_time_only_rolls_over_to_next_month(client, monkeypatch):
+    import idf_trains.main as main
+
+    monkeypatch.setattr(main, "now_paris", lambda: datetime(2026, 11, 30, 23, 50, tzinfo=PARIS))
+    client.get("/itineraries", params={"from": "a:1", "to": "b:2", "time": "07:00"})
+    assert client.calls[0].url.params["datetime"] == "20261201T070000"

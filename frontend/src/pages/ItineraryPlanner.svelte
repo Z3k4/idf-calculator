@@ -2,12 +2,12 @@
   import { ApiError, createSavedItinerary, listSavedItineraries, type Place } from '../lib/api';
   import ItineraryResults from '../lib/ItineraryResults.svelte';
   import PlacePicker from '../lib/PlacePicker.svelte';
-  import TimeChooser, { nowLocal, type TimeMode } from '../lib/TimeChooser.svelte';
+  import TimeChooser, { type TimeMode, type TimeValue } from '../lib/TimeChooser.svelte';
 
   let {
     initial,
   }: {
-    initial: { from: Place | null; to: Place | null; mode: TimeMode; when: string | null };
+    initial: { from: Place | null; to: Place | null; mode: TimeMode; time: TimeValue };
   } = $props();
 
   // svelte-ignore state_referenced_locally
@@ -17,7 +17,7 @@
   // svelte-ignore state_referenced_locally
   let mode = $state<TimeMode>(initial.mode);
   // svelte-ignore state_referenced_locally
-  let when = $state(initial.when ?? nowLocal());
+  let time = $state<TimeValue>(initial.time);
 
   let name = $state('');
   let saving = $state(false);
@@ -29,16 +29,20 @@
   const usesPosition = $derived(origin?.type === 'position' || destination?.type === 'position');
 
   $effect(() => {
-    syncUrl(origin, destination, mode, when);
+    syncUrl(origin, destination, mode, time);
     saveError = null;
     existingId = null;
   });
 
-  function syncUrl(o: Place | null, d: Place | null, m: TimeMode, w: string) {
+  function syncUrl(o: Place | null, d: Place | null, m: TimeMode, w: TimeValue) {
     const p = new URLSearchParams();
     if (o) p.set('from', o.id), p.set('fromName', o.name);
     if (d) p.set('to', d.id), p.set('toName', d.name);
-    if (m !== 'now') p.set('mode', m), p.set('when', w);
+    if (m !== 'now') {
+      p.set('mode', m);
+      if (w.date) p.set('date', w.date);
+      if (w.time) p.set('time', w.time);
+    }
     const hash = `#/itineraire${p.size ? `?${p}` : ''}`;
     if (location.hash !== hash) history.replaceState(null, '', hash);
   }
@@ -78,14 +82,14 @@
     </button>
     <PlacePicker label="Arrivée" bind:place={destination} autofocus={!!origin && !destination} />
   </div>
-  <TimeChooser bind:mode bind:when />
+  <TimeChooser bind:mode bind:value={time} />
   {#if origin && destination && origin.id === destination.id}
     <p class="hint error">Choisissez deux lieux différents.</p>
   {/if}
 </section>
 
 {#if ready && origin && destination}
-  <ItineraryResults from={origin.id} to={destination.id} {mode} {when} />
+  <ItineraryResults from={origin.id} to={destination.id} {mode} {time} />
 
   <form class="card save" onsubmit={save}>
     {#if usesPosition}

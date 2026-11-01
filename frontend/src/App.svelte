@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { getStation, type Place, type Station } from './lib/api';
+  import { timeFromParams, type TimeValue } from './lib/TimeChooser.svelte';
   import Departures from './lib/Departures.svelte';
   import LineBadge from './lib/LineBadge.svelte';
   import StationSearch from './lib/StationSearch.svelte';
@@ -43,7 +44,7 @@
     | { name: 'home' }
     | { name: 'departures' }
     | { name: 'planner'; from: string | null; to: string | null }
-    | { name: 'itinerary'; from: Place | null; to: Place | null; mode: 'now' | 'departure' | 'arrival'; when: string | null }
+    | { name: 'itinerary'; from: Place | null; to: Place | null; mode: 'now' | 'departure' | 'arrival'; time: TimeValue }
     | { name: 'journeys' }
     | { name: 'journey'; id: number }
     | { name: 'savedItinerary'; id: number }
@@ -64,7 +65,7 @@
         from: placeFromUrl(params.get('from'), params.get('fromName')),
         to: placeFromUrl(params.get('to'), params.get('toName')),
         mode: mode === 'departure' || mode === 'arrival' ? mode : 'now',
-        when: params.get('when'),
+        time: timeFromParams(params),
       };
     }
     if (path === '/trajets') return { name: 'journeys' };

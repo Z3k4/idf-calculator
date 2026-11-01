@@ -158,6 +158,9 @@ class Itinerary(BaseModel):
 class ItinerariesResponse(BaseModel):
     origin: str
     destination: str
+    # Horaire utilisé pour le calcul (heure de Paris) ; absent = maintenant
+    requested_at: datetime | None = None
+    represents: str = "departure"
     itineraries: list[Itinerary]
     message: str | None = None
 

@@ -193,6 +193,8 @@ export interface Itinerary {
 export interface ItinerariesResponse {
   origin: string;
   destination: string;
+  requested_at: string | null;
+  represents: 'departure' | 'arrival';
   itineraries: Itinerary[];
   message: string | null;
 }
@@ -202,13 +204,13 @@ export const searchPlaces = (q: string, signal?: AbortSignal) => get<Place[]>('/
 export function getItineraries(
   from: string,
   to: string,
-  options: { datetime?: string; represents?: 'departure' | 'arrival'; count?: number } = {},
+  options: { date?: string; time?: string; represents?: 'departure' | 'arrival'; count?: number } = {},
 ) {
+  // Date et heure facultatives : l'API complète avec aujourd'hui / l'heure actuelle
   const params: Record<string, string | number> = { from, to, count: options.count ?? 4 };
-  if (options.datetime) {
-    params.datetime = options.datetime;
-    params.represents = options.represents ?? 'departure';
-  }
+  if (options.date) params.date = options.date;
+  if (options.time) params.time = options.time;
+  if (options.date || options.time) params.represents = options.represents ?? 'departure';
   return get<ItinerariesResponse>('/itineraries', params);
 }
 

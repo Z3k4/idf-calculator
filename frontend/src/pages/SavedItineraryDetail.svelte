@@ -2,14 +2,14 @@
   import { deleteSavedItinerary, getSavedItinerary, renameSavedItinerary, type SavedItinerary } from '../lib/api';
   import { journeyTitle } from '../lib/format';
   import ItineraryResults from '../lib/ItineraryResults.svelte';
-  import TimeChooser, { nowLocal, type TimeMode } from '../lib/TimeChooser.svelte';
+  import TimeChooser, { emptyTime, type TimeMode, type TimeValue } from '../lib/TimeChooser.svelte';
 
   let { id }: { id: number } = $props();
 
   let itinerary = $state<SavedItinerary | null>(null);
   let notFound = $state(false);
   let mode = $state<TimeMode>('now');
-  let when = $state(nowLocal());
+  let time = $state<TimeValue>(emptyTime());
   let editing = $state(false);
   let draftName = $state('');
 
@@ -71,10 +71,10 @@
       <li><span class="dot"></span><strong>{itinerary.origin.name}</strong></li>
       <li><span class="dot end"></span><strong>{itinerary.destination.name}</strong></li>
     </ol>
-    <TimeChooser bind:mode bind:when />
+    <TimeChooser bind:mode bind:value={time} />
   </section>
 
-  <ItineraryResults from={itinerary.origin.id} to={itinerary.destination.id} {mode} {when} />
+  <ItineraryResults from={itinerary.origin.id} to={itinerary.destination.id} {mode} {time} />
 
   <div class="actions">
     <a href={plannerLink(itinerary, true)}>⇄ Itinéraire retour</a>

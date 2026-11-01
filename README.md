@@ -150,8 +150,15 @@ S'appuie sur le **calculateur d'itinéraires Île-de-France Mobilités** (API Na
 | Paramètre | Description |
 |---|---|
 | `from`, `to` | Identifiant renvoyé par `/places`, ou coordonnées `lon;lat` |
-| `datetime` | Date/heure ISO 8601 (heure de Paris si sans fuseau). Par défaut : maintenant |
+| `date` | Jour `AAAA-MM-JJ`, facultatif. **Sans date : aujourd'hui, ou demain si l'heure indiquée est déjà passée** |
+| `time` | Heure `HH:MM`, facultative. **Sans heure : l'heure actuelle** |
+| `datetime` | Alternative à `date`/`time` : date et heure ISO 8601 complètes (heure de Paris si sans fuseau) |
 | `represents` | `departure` (partir à, défaut) ou `arrival` (arriver avant) |
+
+Sans `date`, `time` ni `datetime`, le calcul part de maintenant. Exemples : à 18h, `time=20:15` signifie aujourd'hui à 20h15
+et `time=08:15` signifie **demain** à 8h15 (heure déjà passée, comparée à la minute près) ;
+`date=2026-11-05` signifie le 5 novembre à l'heure actuelle. La réponse indique l'horaire effectivement utilisé
+(`requested_at`, heure de Paris) et `represents`. Les mêmes paramètres s'appliquent à `/itineraries/saved/{id}/next`.
 | `count` | Nombre d'itinéraires (1 à 6, défaut 3) |
 
 Chaque itinéraire donne les horaires, la durée, le nombre de correspondances, la marche, le CO₂ et la liste des

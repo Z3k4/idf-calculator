@@ -1,51 +1,121 @@
 <script lang="ts" module>
   export type TimeMode = 'now' | 'departure' | 'arrival';
 
-  /** Valeur pour <input type="datetime-local"> : heure locale, arrondie aux 5 minutes. */
-  export function nowLocal() {
-    const d = new Date();
-    d.setMinutes(Math.ceil(d.getMinutes() / 5) * 5, 0, 0);
-    const pad = (n: number) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  /** Date (AAAA-MM-JJ) et heure (HH:MM) facultatives : vides = aujourd'hui / heure actuelle. */
+  export interface TimeValue {
+    date: string;
+    time: string;
+  }
+
+  export const emptyTime = (): TimeValue => ({ date: '', time: '' });
+
+  /** Lit les paramètres d'URL (`date`, `time`, ou l'ancien `when` = AAAA-MM-JJTHH:MM). */
+  export function timeFromParams(params: URLSearchParams): TimeValue {
+    const legacy = params.get('when');
+    if (legacy) {
+      const [date = '', time = ''] = legacy.split('T');
+      return { date, time: time.slice(0, 5) };
+    }
+    return { date: params.get('date') ?? '', time: params.get('time') ?? '' };
   }
 </script>
 
 <script lang="ts">
-  // `when` n'est mis à jour qu'à la validation du champ (pas à chaque frappe) pour ne pas
-  // déclencher une recherche (et consommer le quota) à chaque modification
-  let { mode = $bindable('now'), when = $bindable(nowLocal()) }: { mode?: TimeMode; when?: string } = $props();
+  let {
+    mode = $bindable('now'),
+    value = $bindable(emptyTime()),
+  }: { mode?: TimeMode; value?: TimeValue } = $props();
 
+  // Brouillons : la valeur n'est transmise qu'à la validation d'un champ (événement change),
+  // pour ne pas lancer un calcul (et consommer le quota) à chaque chiffre tapé
   // svelte-ignore state_referenced_locally
-  let draft = $state(when);
+  let draftDate = $state(value.date);
+  // svelte-ignore state_referenced_locally
+  let draftTime = $state(value.time);
 
   const MODES: [TimeMode, string][] = [
     ['now', 'Maintenant'],
     ['departure', 'Partir à'],
     ['arrival', 'Arriver à'],
   ];
+
+  function commit() {
+    value = { date: draftDate, time: draftTime };
+  }
+
+  function clear(field: 'date' | 'time') {
+    if (field === 'date') draftDate = '';
+    else draftTime = '';
+    commit();
+  }
+
+  const todayIso = () => {
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  };
+  const dayFmt = new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+
+  // Résumé lisible de l'horaire qui sera utilisé
+  const summary = $derived.by(() => {
+    if (mode === 'now') return null;
+    const verb = mode === 'departure' ? 'Départ' : 'Arrivée';
+    if (!value.date && !value.time) return `${verb} maintenant`;
+    // Même règle que l'API : une heure seule déjà passée désigne le lendemain
+    const now = new Date();
+    const currentHHMM = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const day = !value.date
+      ? value.time && value.time < currentHHMM
+        ? 'demain'
+        : "aujourd'hui"
+      : value.date === todayIso()
+        ? "aujourd'hui"
+        : `le ${dayFmt.format(new Date(`${value.date}T12:00:00`))}`;
+    const hour = value.time ? `à ${value.time.replace(':', 'h')}` : "à l'heure actuelle";
+    return `${verb} ${day} ${hour}`;
+  });
 </script>
 
-<div class="when">
+<div class="chooser">
   <div class="segmented" role="radiogroup" aria-label="Horaire">
-    {#each MODES as [value, label] (value)}
-      <button type="button" role="radio" aria-checked={mode === value} class:on={mode === value} onclick={() => (mode = value)}>
+    {#each MODES as [m, label] (m)}
+      <button type="button" role="radio" aria-checked={mode === m} class:on={mode === m} onclick={() => (mode = m)}>
         {label}
       </button>
     {/each}
   </div>
+
   {#if mode !== 'now'}
-    <input type="datetime-local" bind:value={draft} onchange={() => (when = draft)} aria-label="Date et heure" />
+    <div class="fields">
+      <label class="field">
+        <span>Date</span>
+        <span class="input">
+          <input type="date" bind:value={draftDate} onchange={commit} aria-label="Date (facultative)" />
+          {#if draftDate}<button type="button" class="clear" onclick={() => clear('date')} aria-label="Effacer la date">×</button>{/if}
+        </span>
+        <small>Vide : aujourd'hui (demain si l'heure est passée)</small>
+      </label>
+      <label class="field">
+        <span>Heure</span>
+        <span class="input">
+          <input type="time" bind:value={draftTime} onchange={commit} aria-label="Heure (facultative)" />
+          {#if draftTime}<button type="button" class="clear" onclick={() => clear('time')} aria-label="Effacer l'heure">×</button>{/if}
+        </span>
+        <small>Vide : heure actuelle</small>
+      </label>
+    </div>
+    <p class="summary">{summary}</p>
   {/if}
 </div>
 
 <style>
-  .when {
+  .chooser {
     display: flex;
-    flex-wrap: wrap;
-    align-items: center;
+    flex-direction: column;
     gap: 0.6rem;
   }
   .segmented {
+    align-self: flex-start;
     display: inline-flex;
     padding: 0.2rem;
     background: var(--hover);
@@ -67,12 +137,58 @@
     color: var(--text);
     box-shadow: var(--shadow);
   }
+  .fields {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .field small {
+    font-weight: 400;
+    font-size: 0.75rem;
+    color: var(--muted);
+  }
+  .input {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
   input {
     font: inherit;
+    font-weight: 400;
     padding: 0.45rem 0.6rem;
     border: 1px solid var(--border);
     border-radius: 10px;
     background: var(--bg);
     color: var(--text);
+    min-width: 0;
+  }
+  input:focus {
+    outline: 0;
+    border-color: var(--accent);
+  }
+  .clear {
+    width: 1.8rem;
+    height: 1.8rem;
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--muted);
+    font-size: 1rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .summary {
+    margin: 0;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--accent);
   }
 </style>

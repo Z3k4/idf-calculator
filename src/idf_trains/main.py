@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as dtime
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
@@ -447,6 +448,45 @@ async def search_places(
         raise _navitia_http_error(exc) from exc
 
 
+def itinerary_when(
+    when: datetime | None = Query(
+        None,
+        alias="datetime",
+        description="Date et heure complètes (ISO 8601, heure de Paris si sans fuseau). "
+        "Alternative à date/time",
+    ),
+    day: date | None = Query(
+        None, alias="date", description="Jour (AAAA-MM-JJ). Sans date : aujourd'hui"
+    ),
+    hour: dtime | None = Query(
+        None,
+        alias="time",
+        description="Heure (HH:MM). Sans heure : l'heure actuelle. "
+        "Sans date, une heure déjà passée désigne le lendemain",
+    ),
+) -> datetime | None:
+    """Horaire demandé, complété avec l'heure de Paris.
+
+    - `datetime` : utilisé tel quel ;
+    - `time` seul : aujourd'hui à cette heure, ou demain si elle est déjà passée ;
+    - `date` seule : ce jour-là, à l'heure actuelle ;
+    - rien : maintenant (None, le calculateur part de l'instant présent).
+    """
+    if when is not None and (day is not None or hour is not None):
+        raise HTTPException(422, "Utilisez soit « datetime », soit « date » et/ou « time »")
+    if when is not None:
+        return when
+    if day is None and hour is None:
+        return None
+    now = now_paris()
+    current_minute = now.time().replace(second=0, microsecond=0)
+    resolved_time = hour.replace(second=0, microsecond=0, tzinfo=None) if hour else current_minute
+    if day is None:
+        # Heure seule déjà passée (à la minute près) : c'est pour demain
+        day = now.date() + timedelta(days=1) if resolved_time < current_minute else now.date()
+    return datetime.combine(day, resolved_time, tzinfo=PARIS)
+
+
 @app.get(
     "/itineraries",
     response_model=ItinerariesResponse,
@@ -456,11 +496,7 @@ async def search_places(
 async def compute_itineraries(
     origin: str = Query(..., alias="from", description="Identifiant de lieu (/places) ou « lon;lat »"),
     destination: str = Query(..., alias="to", description="Identifiant de lieu (/places) ou « lon;lat »"),
-    when: datetime | None = Query(
-        None,
-        alias="datetime",
-        description="Date et heure (ISO 8601, heure de Paris si sans fuseau). Par défaut : maintenant",
-    ),
+    when: datetime | None = Depends(itinerary_when),
     represents: str = Query(
         "departure", pattern="^(departure|arrival)$", description="Partir à (departure) ou arriver avant (arrival)"
     ),
@@ -470,6 +506,12 @@ async def compute_itineraries(
     origin = _place_id(origin, "de départ")
     destination = _place_id(destination, "d'arrivée")
     return await run_itineraries(navitia, origin, destination, when, represents, count)
+
+
+def _as_paris(when: datetime | None) -> datetime | None:
+    if when is None:
+        return None
+    return when.astimezone(PARIS) if when.tzinfo else when.replace(tzinfo=PARIS)
 
 
 async def run_itineraries(
@@ -485,12 +527,21 @@ async def run_itineraries(
     try:
         itineraries = await navitia.journeys(origin, destination, when, represents, count)
     except NoSolution as exc:
-        return ItinerariesResponse(origin=origin, destination=destination, itineraries=[], message=str(exc))
+        return ItinerariesResponse(
+            origin=origin,
+            destination=destination,
+            requested_at=_as_paris(when),
+            represents=represents if when else "departure",
+            itineraries=[],
+            message=str(exc),
+        )
     except PrimError as exc:
         raise _navitia_http_error(exc) from exc
     return ItinerariesResponse(
         origin=origin,
         destination=destination,
+        requested_at=_as_paris(when),
+        represents=represents if when else "departure",
         itineraries=itineraries,
         message=None if itineraries else "Aucun itinéraire trouvé.",
     )
@@ -597,7 +648,7 @@ def delete_saved_itinerary(
 )
 async def saved_itinerary_next(
     itinerary: SavedItinerary = Depends(get_saved_itinerary_or_404),
-    when: datetime | None = Query(None, alias="datetime", description="Par défaut : maintenant"),
+    when: datetime | None = Depends(itinerary_when),
     represents: str = Query("departure", pattern="^(departure|arrival)$"),
     count: int = Query(3, ge=1, le=6),
     navitia: NavitiaClient = Depends(get_navitia),

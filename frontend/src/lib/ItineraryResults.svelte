@@ -1,10 +1,10 @@
 <script lang="ts">
   import { getItineraries, type ItinerariesResponse } from './api';
   import ItineraryCard from './ItineraryCard.svelte';
-  import type { TimeMode } from './TimeChooser.svelte';
+  import type { TimeMode, TimeValue } from './TimeChooser.svelte';
 
   // Pas de rafraîchissement périodique : le quota de l'API itinéraire IDFM est limité
-  let { from, to, mode, when }: { from: string; to: string; mode: TimeMode; when: string } = $props();
+  let { from, to, mode, time }: { from: string; to: string; mode: TimeMode; time: TimeValue } = $props();
 
   let data = $state<ItinerariesResponse | null>(null);
   let error = $state<string | null>(null);
@@ -13,12 +13,12 @@
   let refreshKey = $state(0);
 
   $effect(() => {
-    const [f, t, m, w] = [from, to, mode, when];
+    const [f, t, m, w] = [from, to, mode, time];
     refreshKey;
     let stale = false;
     loading = true;
     error = null;
-    getItineraries(f, t, m === 'now' ? {} : { datetime: w, represents: m })
+    getItineraries(f, t, m === 'now' ? {} : { date: w.date, time: w.time, represents: m })
       .then((res) => {
         if (stale) return;
         data = res;
