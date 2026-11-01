@@ -1,0 +1,31 @@
+# Lancement : docker compose up -d --build  →  http://localhost:8000
+# La clé PRIM et les réglages sont lus dans .env (voir .env.example).
+services:
+  app:
+    build: .
+    image: idf-trains:latest
+    container_name: idf-trains
+    restart: unless-stopped
+    ports:
+      - "${IDF_PORT:-8000}:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Chemins internes à l'image (ne pas modifier)
+      IDF_DB_PATH: /data/journeys.db
+    volumes:
+      # Base SQLite : trajets/itinéraires sauvegardés, accueil, cache des adresses, consommation
+      - idf-data:/data
+
+  # Cache partagé facultatif : docker compose --profile redis up -d
+  # puis ajoutez IDF_REDIS_URL=redis://redis:6379/0 dans .env
+  redis:
+    image: redis:7.4-alpine
+    container_name: idf-trains-redis
+    restart: unless-stopped
+    profiles: ["redis"]
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+
+volumes:
+  idf-data:

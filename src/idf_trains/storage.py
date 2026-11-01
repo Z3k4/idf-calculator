@@ -121,9 +121,20 @@ CREATE TABLE IF NOT EXISTS saved_itineraries (
     origin         TEXT NOT NULL,  -- lieu complet en JSON (nom, type, coordonnées…)
     destination    TEXT NOT NULL,
     created_at     TEXT NOT NULL,
+    -- Horaire par défaut : now | departure | arrival, avec date (AAAA-MM-JJ) et heure (HH:MM) facultatives
+    schedule_mode  TEXT NOT NULL DEFAULT 'now',
+    schedule_date  TEXT,
+    schedule_time  TEXT,
     UNIQUE (origin_id, destination_id)
 );
 """
+
+# Colonnes ajoutées après la première version : migrées automatiquement sur les bases existantes
+ITINERARY_MIGRATIONS = {
+    "schedule_mode": "ALTER TABLE saved_itineraries ADD COLUMN schedule_mode TEXT NOT NULL DEFAULT 'now'",
+    "schedule_date": "ALTER TABLE saved_itineraries ADD COLUMN schedule_date TEXT",
+    "schedule_time": "ALTER TABLE saved_itineraries ADD COLUMN schedule_time TEXT",
+}
 
 
 class DuplicateItineraryError(Exception):
@@ -139,6 +150,7 @@ class ItineraryRow:
     origin: dict
     destination: dict
     created_at: datetime
+    schedule: dict  # {"mode": ..., "date": ... | None, "time": ... | None}
 
 
 def _itinerary_row(r: sqlite3.Row) -> ItineraryRow:
@@ -148,11 +160,23 @@ def _itinerary_row(r: sqlite3.Row) -> ItineraryRow:
         origin=json.loads(r["origin"]),
         destination=json.loads(r["destination"]),
         created_at=datetime.fromisoformat(r["created_at"]),
+        schedule={"mode": r["schedule_mode"], "date": r["schedule_date"], "time": r["schedule_time"]},
     )
+
+
+NO_SCHEDULE = {"mode": "now", "date": None, "time": None}
 
 
 class ItineraryStore(SQLiteStore):
     SCHEMA = ITINERARY_SCHEMA
+
+    def __init__(self, path: Path | str):
+        super().__init__(path)
+        with self._connect() as db:
+            columns = {r["name"] for r in db.execute("PRAGMA table_info(saved_itineraries)")}
+            for column, ddl in ITINERARY_MIGRATIONS.items():
+                if column not in columns:
+                    db.execute(ddl)
 
     def list(self) -> list[ItineraryRow]:
         with self._connect() as db:
@@ -164,18 +188,24 @@ class ItineraryStore(SQLiteStore):
             r = db.execute("SELECT * FROM saved_itineraries WHERE id = ?", (itinerary_id,)).fetchone()
         return _itinerary_row(r) if r else None
 
-    def create(self, origin: dict, destination: dict, name: str | None) -> ItineraryRow:
+    @staticmethod
+    def _check_unique(db, origin_id: str, destination_id: str, exclude_id: int | None = None) -> None:
+        existing = db.execute(
+            "SELECT id FROM saved_itineraries WHERE origin_id = ? AND destination_id = ? AND id IS NOT ?",
+            (origin_id, destination_id, exclude_id),
+        ).fetchone()
+        if existing:
+            raise DuplicateItineraryError(existing["id"])
+
+    def create(
+        self, origin: dict, destination: dict, name: str | None, schedule: dict | None = None
+    ) -> ItineraryRow:
+        schedule = schedule or NO_SCHEDULE
         with self._connect() as db:
-            existing = db.execute(
-                "SELECT id FROM saved_itineraries WHERE origin_id = ? AND destination_id = ?",
-                (origin["id"], destination["id"]),
-            ).fetchone()
-            if existing:
-                raise DuplicateItineraryError(existing["id"])
+            self._check_unique(db, origin["id"], destination["id"])
             cur = db.execute(
-                "INSERT INTO saved_itineraries "
-                "(name, origin_id, destination_id, origin, destination, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO saved_itineraries (name, origin_id, destination_id, origin, destination, "
+                "created_at, schedule_mode, schedule_date, schedule_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     name,
                     origin["id"],
@@ -183,15 +213,44 @@ class ItineraryStore(SQLiteStore):
                     json.dumps(origin, ensure_ascii=False),
                     json.dumps(destination, ensure_ascii=False),
                     datetime.now(timezone.utc).isoformat(),
+                    schedule["mode"],
+                    schedule["date"],
+                    schedule["time"],
                 ),
             )
             itinerary_id = cur.lastrowid
         return self.get(itinerary_id)  # type: ignore[return-value]
 
-    def rename(self, itinerary_id: int, name: str | None) -> ItineraryRow | None:
+    def update(self, itinerary_id: int, **changes) -> ItineraryRow | None:
+        """Mise à jour partielle : name, origin, destination, schedule (seuls les champs fournis)."""
+        current = self.get(itinerary_id)
+        if current is None:
+            return None
+        origin = changes.get("origin", current.origin)
+        destination = changes.get("destination", current.destination)
+        schedule = changes.get("schedule", current.schedule)
+        name = changes["name"] if "name" in changes else current.name
         with self._connect() as db:
-            db.execute("UPDATE saved_itineraries SET name = ? WHERE id = ?", (name, itinerary_id))
+            self._check_unique(db, origin["id"], destination["id"], exclude_id=itinerary_id)
+            db.execute(
+                "UPDATE saved_itineraries SET name = ?, origin_id = ?, destination_id = ?, origin = ?, "
+                "destination = ?, schedule_mode = ?, schedule_date = ?, schedule_time = ? WHERE id = ?",
+                (
+                    name,
+                    origin["id"],
+                    destination["id"],
+                    json.dumps(origin, ensure_ascii=False),
+                    json.dumps(destination, ensure_ascii=False),
+                    schedule["mode"],
+                    schedule["date"],
+                    schedule["time"],
+                    itinerary_id,
+                ),
+            )
         return self.get(itinerary_id)
+
+    def rename(self, itinerary_id: int, name: str | None) -> ItineraryRow | None:
+        return self.update(itinerary_id, name=name)
 
     def delete(self, itinerary_id: int) -> bool:
         with self._connect() as db:

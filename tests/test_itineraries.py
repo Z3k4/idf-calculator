@@ -305,3 +305,100 @@ def test_time_only_rolls_over_to_next_month(client, monkeypatch):
     monkeypatch.setattr(main, "now_paris", lambda: datetime(2026, 11, 30, 23, 50, tzinfo=PARIS))
     client.get("/itineraries", params={"from": "a:1", "to": "b:2", "time": "07:00"})
     assert client.calls[0].url.params["datetime"] == "20261201T070000"
+
+
+# --- Horaire enregistré et modification d'un itinéraire sauvegardé -------------------------
+
+
+def test_update_schedule_of_existing_itinerary_is_not_a_duplicate(client):
+    """Cas signalé : changer la date d'un itinéraire sauvegardé ne doit pas répondre « déjà sauvegardé »."""
+    sid = client.post("/itineraries/saved", json={"origin": RIVOLI, "destination": GDL, "name": "Boulot"}).json()["id"]
+    resp = client.patch(
+        f"/itineraries/saved/{sid}",
+        json={"origin": RIVOLI, "destination": GDL, "schedule": {"mode": "arrival", "date": "2026-11-05", "time": "09:00"}},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["schedule"] == {"mode": "arrival", "date": "2026-11-05", "time": "09:00"}
+    assert body["name"] == "Boulot"  # champ non envoyé : inchangé
+
+
+def test_create_with_schedule_and_partial_updates(client):
+    resp = client.post(
+        "/itineraries/saved",
+        json={"origin": RIVOLI, "destination": GDL, "schedule": {"mode": "departure", "time": "07:45"}},
+    )
+    saved = resp.json()
+    assert saved["schedule"] == {"mode": "departure", "date": None, "time": "07:45"}
+    sid = saved["id"]
+
+    # Renommer seulement : l'horaire est conservé
+    body = client.patch(f"/itineraries/saved/{sid}", json={"name": "Matin"}).json()
+    assert body["name"] == "Matin" and body["schedule"]["time"] == "07:45"
+    # Repasser en « maintenant » efface date/heure
+    body = client.patch(f"/itineraries/saved/{sid}", json={"schedule": {"mode": "now", "time": "07:45"}}).json()
+    assert body["schedule"] == {"mode": "now", "date": None, "time": None}
+    # Changer de destination
+    tour = {"id": "poi:osm:node:1", "name": "Tour Eiffel (Paris)", "type": "poi"}
+    assert client.patch(f"/itineraries/saved/{sid}", json={"destination": tour}).json()["destination"]["name"] == tour["name"]
+    # Effacer le nom
+    assert client.patch(f"/itineraries/saved/{sid}", json={"name": None}).json()["name"] is None
+
+
+def test_update_to_an_existing_pair_conflicts(client):
+    a = client.post("/itineraries/saved", json={"origin": RIVOLI, "destination": GDL}).json()["id"]
+    b = client.post("/itineraries/saved", json={"origin": GDL, "destination": RIVOLI}).json()["id"]
+    resp = client.patch(f"/itineraries/saved/{b}", json={"origin": RIVOLI, "destination": GDL})
+    assert resp.status_code == 409
+    assert client.patch(f"/itineraries/saved/{a}", json={"destination": RIVOLI}).status_code == 422  # départ = arrivée
+
+
+@pytest.mark.parametrize(
+    "schedule",
+    [{"mode": "arrival", "time": "9h"}, {"mode": "arrival", "date": "2026-02-30"}, {"mode": "later"}],
+)
+def test_invalid_schedule(client, schedule):
+    assert client.post("/itineraries/saved", json={"origin": RIVOLI, "destination": GDL, "schedule": schedule}).status_code == 422
+
+
+def test_next_uses_saved_schedule_by_default(client, frozen_now):
+    sid = client.post(
+        "/itineraries/saved",
+        json={"origin": RIVOLI, "destination": GDL, "schedule": {"mode": "arrival", "time": "09:00"}},
+    ).json()["id"]
+
+    body = client.get(f"/itineraries/saved/{sid}/next").json()
+    sent = client.calls[-1].url.params
+    # 9h00 est passée à 18h42 : demain, en heure d'arrivée
+    assert sent["datetime"] == "20261102T090000" and sent["datetime_represents"] == "arrival"
+    assert body["requested_at"] == "2026-11-02T09:00:00+01:00"
+
+    # Un horaire précisé dans la requête l'emporte
+    client.get(f"/itineraries/saved/{sid}/next", params={"time": "20:00"})
+    sent = client.calls[-1].url.params
+    assert sent["datetime"] == "20261101T200000" and sent["datetime_represents"] == "departure"
+
+
+def test_old_database_is_migrated(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    con = sqlite3.connect(db)
+    con.execute(
+        "CREATE TABLE saved_itineraries (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, origin_id TEXT NOT NULL, "
+        "destination_id TEXT NOT NULL, origin TEXT NOT NULL, destination TEXT NOT NULL, created_at TEXT NOT NULL, "
+        "UNIQUE (origin_id, destination_id))"
+    )
+    con.execute(
+        "INSERT INTO saved_itineraries (name, origin_id, destination_id, origin, destination, created_at) "
+        "VALUES ('Ancien', 'a:1', 'b:2', '{\"id\": \"a:1\", \"name\": \"A\", \"type\": \"poi\"}', "
+        "'{\"id\": \"b:2\", \"name\": \"B\", \"type\": \"poi\"}', '2026-10-01T00:00:00+00:00')"
+    )
+    con.commit()
+    con.close()
+
+    store = ItineraryStore(db)
+    [row] = store.list()
+    assert row.name == "Ancien" and row.schedule == {"mode": "now", "date": None, "time": None}
+    updated = store.update(row.id, schedule={"mode": "arrival", "date": None, "time": "08:30"})
+    assert updated.schedule["time"] == "08:30"

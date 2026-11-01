@@ -20,7 +20,9 @@ from .models import (
     HomeResponse,
     HomeUpdate,
     SavedItinerary,
+    ItinerarySchedule,
     SavedItineraryCreate,
+    SavedItineraryUpdate,
     UsageCall,
     UsageDay,
     UsageEndpoint,
@@ -476,6 +478,11 @@ def itinerary_when(
         raise HTTPException(422, "Utilisez soit « datetime », soit « date » et/ou « time »")
     if when is not None:
         return when
+    return resolve_when(day, hour)
+
+
+def resolve_when(day: date | None, hour: dtime | None) -> datetime | None:
+    """Complète une date et/ou une heure facultatives (voir itinerary_when)."""
     if day is None and hour is None:
         return None
     now = now_paris()
@@ -556,6 +563,7 @@ def to_saved_itinerary(row: ItineraryRow) -> SavedItinerary:
         name=row.name,
         origin=Place(**row.origin),
         destination=Place(**row.destination),
+        schedule=ItinerarySchedule(**row.schedule),
         created_at=row.created_at,
     )
 
@@ -593,7 +601,10 @@ def create_saved_itinerary(
         raise HTTPException(422, "Les lieux de départ et d'arrivée doivent être différents")
     try:
         row = store.create(
-            body.origin.model_dump(), body.destination.model_dump(), _clean_name(body.name)
+            body.origin.model_dump(),
+            body.destination.model_dump(),
+            _clean_name(body.name),
+            body.schedule.model_dump(),
         )
     except DuplicateItineraryError as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -613,15 +624,32 @@ def get_saved_itinerary(itinerary: SavedItinerary = Depends(get_saved_itinerary_
 @app.patch(
     "/itineraries/saved/{itinerary_id}",
     response_model=SavedItinerary,
-    summary="Renommer un itinéraire sauvegardé",
+    summary="Modifier un itinéraire sauvegardé (nom, lieux, horaire)",
     tags=["itinéraires"],
 )
-def rename_saved_itinerary(
-    body: SavedJourneyUpdate,
+def update_saved_itinerary(
+    body: SavedItineraryUpdate,
     itinerary: SavedItinerary = Depends(get_saved_itinerary_or_404),
     store: ItineraryStore = Depends(get_itinerary_store),
 ):
-    return to_saved_itinerary(store.rename(itinerary.id, _clean_name(body.name)))
+    sent = body.model_fields_set
+    changes: dict = {}
+    if "name" in sent:
+        changes["name"] = _clean_name(body.name)
+    for field in ("origin", "destination", "schedule"):
+        value = getattr(body, field)
+        if field in sent and value is not None:
+            changes[field] = value.model_dump()
+
+    origin_id = changes.get("origin", {}).get("id", itinerary.origin.id)
+    destination_id = changes.get("destination", {}).get("id", itinerary.destination.id)
+    if origin_id == destination_id:
+        raise HTTPException(422, "Les lieux de départ et d'arrivée doivent être différents")
+    try:
+        row = store.update(itinerary.id, **changes)
+    except DuplicateItineraryError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return to_saved_itinerary(row)
 
 
 @app.delete(
@@ -647,14 +675,30 @@ def delete_saved_itinerary(
     tags=["itinéraires"],
 )
 async def saved_itinerary_next(
+    request: Request,
     itinerary: SavedItinerary = Depends(get_saved_itinerary_or_404),
     when: datetime | None = Depends(itinerary_when),
-    represents: str = Query("departure", pattern="^(departure|arrival)$"),
+    represents: str | None = Query(
+        None, pattern="^(departure|arrival)$", description="Par défaut : celui de l'horaire enregistré"
+    ),
     count: int = Query(3, ge=1, le=6),
     navitia: NavitiaClient = Depends(get_navitia),
 ):
+    # Sans horaire dans la requête, on applique l'horaire enregistré avec l'itinéraire
+    if not {"datetime", "date", "time"} & set(request.query_params):
+        schedule = itinerary.schedule
+        if schedule.mode == "now":
+            when = None
+        else:
+            when = resolve_when(
+                date.fromisoformat(schedule.date) if schedule.date else None,
+                dtime.fromisoformat(schedule.time) if schedule.time else None,
+            )
+            # Mode « partir/arriver à » sans date ni heure : maintenant, dans le sens choisi
+            when = when or now_paris().replace(second=0, microsecond=0)
+            represents = represents or schedule.mode
     return await run_itineraries(
-        navitia, itinerary.origin.id, itinerary.destination.id, when, represents, count
+        navitia, itinerary.origin.id, itinerary.destination.id, when, represents or "departure", count
     )
 
 

@@ -214,11 +214,19 @@ export function getItineraries(
   return get<ItinerariesResponse>('/itineraries', params);
 }
 
+/** Horaire par défaut d'un itinéraire sauvegardé (date et heure facultatives). */
+export interface ItinerarySchedule {
+  mode: 'now' | 'departure' | 'arrival';
+  date: string | null;
+  time: string | null;
+}
+
 export interface SavedItinerary {
   id: number;
   name: string | null;
   origin: Place;
   destination: Place;
+  schedule: ItinerarySchedule;
   created_at: string;
 }
 
@@ -226,11 +234,20 @@ export const listSavedItineraries = () => get<SavedItinerary[]>('/itineraries/sa
 
 export const getSavedItinerary = (id: number) => get<SavedItinerary>(`/itineraries/saved/${id}`);
 
-export const createSavedItinerary = (origin: Place, destination: Place, name: string | null) =>
-  send<SavedItinerary>('POST', '/itineraries/saved', { origin, destination, name });
+export const createSavedItinerary = (
+  origin: Place,
+  destination: Place,
+  name: string | null,
+  schedule?: ItinerarySchedule,
+) => send<SavedItinerary>('POST', '/itineraries/saved', { origin, destination, name, schedule });
 
-export const renameSavedItinerary = (id: number, name: string | null) =>
-  send<SavedItinerary>('PATCH', `/itineraries/saved/${id}`, { name });
+/** Mise à jour partielle : seuls les champs fournis sont modifiés. */
+export const updateSavedItinerary = (
+  id: number,
+  changes: Partial<{ name: string | null; origin: Place; destination: Place; schedule: ItinerarySchedule }>,
+) => send<SavedItinerary>('PATCH', `/itineraries/saved/${id}`, changes);
+
+export const renameSavedItinerary = (id: number, name: string | null) => updateSavedItinerary(id, { name });
 
 export const deleteSavedItinerary = (id: number) => send<void>('DELETE', `/itineraries/saved/${id}`);
 

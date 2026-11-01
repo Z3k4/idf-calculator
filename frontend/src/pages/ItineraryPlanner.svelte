@@ -1,13 +1,21 @@
 <script lang="ts">
-  import { ApiError, createSavedItinerary, listSavedItineraries, type Place } from '../lib/api';
+  import {
+    ApiError,
+    createSavedItinerary,
+    getSavedItinerary,
+    listSavedItineraries,
+    updateSavedItinerary,
+    type Place,
+  } from '../lib/api';
   import ItineraryResults from '../lib/ItineraryResults.svelte';
   import PlacePicker from '../lib/PlacePicker.svelte';
-  import TimeChooser, { type TimeMode, type TimeValue } from '../lib/TimeChooser.svelte';
+  import TimeChooser, { toSchedule, type TimeMode, type TimeValue } from '../lib/TimeChooser.svelte';
 
   let {
     initial,
   }: {
-    initial: { from: Place | null; to: Place | null; mode: TimeMode; time: TimeValue };
+    // editId : modification d'un itinéraire sauvegardé (« Mettre à jour » au lieu de « Sauvegarder »)
+    initial: { from: Place | null; to: Place | null; mode: TimeMode; time: TimeValue; editId: number | null };
   } = $props();
 
   // svelte-ignore state_referenced_locally
@@ -19,10 +27,20 @@
   // svelte-ignore state_referenced_locally
   let time = $state<TimeValue>(initial.time);
 
+  // svelte-ignore state_referenced_locally
+  const editId = initial.editId;
   let name = $state('');
   let saving = $state(false);
   let saveError = $state<string | null>(null);
   let existingId = $state<number | null>(null);
+
+  // En modification : on reprend le nom enregistré
+  $effect(() => {
+    if (editId === null) return;
+    getSavedItinerary(editId)
+      .then((saved) => (name = saved.name ?? ''))
+      .catch(() => (saveError = "L'itinéraire à modifier n'existe plus."));
+  });
 
   const ready = $derived(!!origin && !!destination && origin.id !== destination.id);
   // « Ma position » change à chaque fois : on ne peut pas la sauvegarder telle quelle
@@ -36,6 +54,7 @@
 
   function syncUrl(o: Place | null, d: Place | null, m: TimeMode, w: TimeValue) {
     const p = new URLSearchParams();
+    if (editId !== null) p.set('edit', String(editId));
     if (o) p.set('from', o.id), p.set('fromName', o.name);
     if (d) p.set('to', d.id), p.set('toName', d.name);
     if (m !== 'now') {
@@ -56,14 +75,23 @@
     if (!origin || !destination) return;
     saving = true;
     saveError = null;
+    existingId = null;
+    const schedule = toSchedule(mode, time);
     try {
-      const saved = await createSavedItinerary(origin, destination, name.trim() || null);
+      const saved =
+        editId !== null
+          ? await updateSavedItinerary(editId, { origin, destination, name: name.trim() || null, schedule })
+          : await createSavedItinerary(origin, destination, name.trim() || null, schedule);
       location.hash = `#/itineraires/${saved.id}`;
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
+        // Le même départ/arrivée existe déjà : proposer de le mettre à jour plutôt que de bloquer
         const all = await listSavedItineraries().catch(() => []);
         existingId = all.find((s) => s.origin.id === origin?.id && s.destination.id === destination?.id)?.id ?? null;
-        saveError = 'Cet itinéraire est déjà sauvegardé.';
+        saveError =
+          editId !== null
+            ? 'Un autre itinéraire sauvegardé relie déjà ces deux lieux.'
+            : 'Cet itinéraire est déjà sauvegardé.';
       } else {
         saveError = (err as Error).message;
       }
@@ -71,10 +99,25 @@
       saving = false;
     }
   }
+
+  /** Après un doublon : applique l'horaire (et le nom s'il est renseigné) à l'itinéraire existant. */
+  async function updateExisting() {
+    if (existingId === null) return;
+    saving = true;
+    try {
+      const changes = { schedule: toSchedule(mode, time), ...(name.trim() ? { name: name.trim() } : {}) };
+      const saved = await updateSavedItinerary(existingId, changes);
+      location.hash = `#/itineraires/${saved.id}`;
+    } catch (err) {
+      saveError = (err as Error).message;
+    } finally {
+      saving = false;
+    }
+  }
 </script>
 
 <section class="card form">
-  <h1>Itinéraire</h1>
+  <h1>{editId !== null ? "Modifier l'itinéraire" : 'Itinéraire'}</h1>
   <div class="pickers">
     <PlacePicker label="Départ" bind:place={origin} allowPosition autofocus={!origin} />
     <button type="button" class="swap" onclick={swap} disabled={!origin && !destination} aria-label="Inverser départ et arrivée" title="Inverser">
@@ -96,15 +139,26 @@
       <p class="hint">Pour sauvegarder cet itinéraire, remplacez « Ma position » par une adresse.</p>
     {:else}
       <label>
-        <span>Sauvegarder cet itinéraire <small>(nom facultatif)</small></span>
+        <span>
+          {editId !== null ? "Nom de l'itinéraire" : 'Sauvegarder cet itinéraire'} <small>(nom facultatif)</small>
+        </span>
         <input bind:value={name} maxlength="80" placeholder="ex. Maison → Bureau" />
       </label>
-      <button type="submit" disabled={saving}>{saving ? 'Sauvegarde…' : 'Sauvegarder'}</button>
+      <button type="submit" disabled={saving}>
+        {saving ? 'Enregistrement…' : editId !== null ? 'Mettre à jour' : 'Sauvegarder'}
+      </button>
+      {#if editId !== null}<a class="cancel" href="#/itineraires/{editId}">Annuler</a>{/if}
+      <p class="hint">L'horaire choisi ci-dessus est enregistré avec l'itinéraire.</p>
     {/if}
     {#if saveError}
       <p class="hint error">
         {saveError}
-        {#if existingId}<a href="#/itineraires/{existingId}">Voir l'itinéraire</a>{/if}
+        {#if existingId !== null && existingId !== editId}
+          {#if editId === null}
+            <button type="button" class="link" onclick={updateExisting} disabled={saving}>Mettre à jour l'itinéraire existant</button>
+          {/if}
+          <a href="#/itineraires/{existingId}">Voir l'itinéraire</a>
+        {/if}
       </p>
     {/if}
   </form>
@@ -215,5 +269,20 @@
   .error a {
     color: var(--accent);
     margin-left: 0.4rem;
+  }
+  .save .link {
+    background: none;
+    border: 0;
+    padding: 0;
+    margin-left: 0.4rem;
+    color: var(--accent);
+    font-weight: 600;
+    text-decoration: underline;
+  }
+  .cancel {
+    align-self: center;
+    color: var(--muted);
+    font-weight: 600;
+    text-decoration: none;
   }
 </style>

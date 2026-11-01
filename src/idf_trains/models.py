@@ -1,7 +1,8 @@
+from datetime import date as date_cls
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class Line(BaseModel):
@@ -176,10 +177,46 @@ class PlaceInput(BaseModel):
     lon: float | None = Field(None, ge=-180, le=180)
 
 
+class ItinerarySchedule(BaseModel):
+    """Horaire par défaut d'un itinéraire sauvegardé.
+
+    `mode` = now (maintenant), departure (partir à) ou arrival (arriver à). `date` et `time` sont
+    facultatives et suivent les mêmes règles que /itineraries : sans date, aujourd'hui (ou demain si
+    l'heure est passée) ; sans heure, l'heure actuelle. Ignorées pour le mode « now ».
+    """
+
+    mode: Literal["now", "departure", "arrival"] = "now"
+    date: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="AAAA-MM-JJ")
+    time: str | None = Field(None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$", description="HH:MM")
+
+    @field_validator("date")
+    @classmethod
+    def _valid_date(cls, value: str | None) -> str | None:
+        if value is not None:
+            date_cls.fromisoformat(value)  # lève ValueError -> 422 si la date n'existe pas
+        return value
+
+    @model_validator(mode="after")
+    def _now_has_no_time(self) -> "ItinerarySchedule":
+        if self.mode == "now":
+            self.date = self.time = None
+        return self
+
+
 class SavedItineraryCreate(BaseModel):
     origin: PlaceInput
     destination: PlaceInput
     name: str | None = Field(None, max_length=80)
+    schedule: ItinerarySchedule = Field(default_factory=ItinerarySchedule)
+
+
+class SavedItineraryUpdate(BaseModel):
+    """Mise à jour partielle : seuls les champs envoyés sont modifiés (name: null efface le nom)."""
+
+    name: str | None = Field(None, max_length=80)
+    origin: PlaceInput | None = None
+    destination: PlaceInput | None = None
+    schedule: ItinerarySchedule | None = None
 
 
 class SavedItinerary(BaseModel):
@@ -187,6 +224,7 @@ class SavedItinerary(BaseModel):
     name: str | None
     origin: Place
     destination: Place
+    schedule: ItinerarySchedule = Field(default_factory=ItinerarySchedule)
     created_at: datetime
 
 

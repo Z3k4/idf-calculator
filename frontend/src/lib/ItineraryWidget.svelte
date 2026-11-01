@@ -18,7 +18,12 @@
   async function load() {
     loading = true;
     try {
-      const res = await getItineraries(itinerary.origin.id, itinerary.destination.id, { count: 2 });
+      const { mode, date, time } = itinerary.schedule;
+      const res = await getItineraries(
+        itinerary.origin.id,
+        itinerary.destination.id,
+        mode === 'now' ? { count: 2 } : { count: 2, date: date ?? '', time: time ?? '', represents: mode },
+      );
       results = res.itineraries.slice(0, 2);
       message = res.message;
       error = null;
@@ -44,6 +49,13 @@
       <span class="kind">Itinéraire</span>
       <strong>{journeyTitle(itinerary)}</strong>
       {#if itinerary.name}<small>{itinerary.origin.name} → {itinerary.destination.name}</small>{/if}
+      {#if itinerary.schedule.mode !== 'now'}
+        <small class="sched">
+          {itinerary.schedule.mode === 'arrival' ? 'Arrivée' : 'Départ'}
+          {itinerary.schedule.date ? `le ${itinerary.schedule.date.split('-').reverse().join('/')}` : ''}
+          {itinerary.schedule.time ? `à ${itinerary.schedule.time.replace(':', 'h')}` : ''}
+        </small>
+      {/if}
     </a>
     <button class="refresh" onclick={load} disabled={loading} aria-label="Recalculer" title="Recalculer">
       <svg class:spinning={loading} viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" /></svg>
@@ -111,6 +123,10 @@
   }
   .head small {
     color: var(--muted);
+  }
+  .head .sched {
+    color: var(--accent);
+    font-weight: 600;
   }
   .refresh {
     width: 2rem;

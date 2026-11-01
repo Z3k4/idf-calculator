@@ -44,7 +44,7 @@
     | { name: 'home' }
     | { name: 'departures' }
     | { name: 'planner'; from: string | null; to: string | null }
-    | { name: 'itinerary'; from: Place | null; to: Place | null; mode: 'now' | 'departure' | 'arrival'; time: TimeValue }
+    | { name: 'itinerary'; from: Place | null; to: Place | null; mode: 'now' | 'departure' | 'arrival'; time: TimeValue; editId: number | null }
     | { name: 'journeys' }
     | { name: 'journey'; id: number }
     | { name: 'savedItinerary'; id: number }
@@ -66,6 +66,7 @@
         to: placeFromUrl(params.get('to'), params.get('toName')),
         mode: mode === 'departure' || mode === 'arrival' ? mode : 'now',
         time: timeFromParams(params),
+        editId: /^\d+$/.test(params.get('edit') ?? '') ? Number(params.get('edit')) : null,
       };
     }
     if (path === '/trajets') return { name: 'journeys' };
@@ -149,7 +150,9 @@
   {:else if page.name === 'usage'}
     <Usage />
   {:else if page.name === 'itinerary'}
-    <ItineraryPlanner initial={page} />
+    {#key page.editId}
+      <ItineraryPlanner initial={page} />
+    {/key}
   {:else if page.name === 'planner'}
     <JourneyPlanner fromId={page.from} toId={page.to} />
   {:else if page.name === 'journeys'}

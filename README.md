@@ -18,6 +18,37 @@ uv run uvicorn idf_trains.main:app --reload
 
 Documentation interactive : http://localhost:8000/docs
 
+## Docker
+
+Une seule image contient l'API et le frontend compilé (construction en plusieurs étapes : Node pour le build Svelte,
+uv pour les dépendances Python, image finale `python:3.12-slim` d'environ 170 Mo, exécutée par un utilisateur sans
+privilèges).
+
+```bash
+cp .env.example .env            # renseignez IDF_PRIM_API_KEY
+docker compose up -d --build    # http://localhost:8000
+docker compose logs -f
+```
+
+- **Données** : la base SQLite (trajets et itinéraires sauvegardés, accueil, cache des adresses, consommation) est
+  stockée dans le volume `idf-data` (`/data` dans le conteneur). Elle est conservée entre redémarrages et mises à jour.
+- **Port** : `IDF_PORT=8080 docker compose up -d` pour publier sur un autre port.
+- **Redis** (facultatif, cache partagé) : `docker compose --profile redis up -d` et ajoutez
+  `IDF_REDIS_URL=redis://redis:6379/0` dans `.env`.
+- **Santé** : healthcheck intégré sur `/health`.
+- **Sans compose** :
+
+```bash
+docker build -t idf-trains .
+docker run -d -p 8000:8000 --env-file .env -v idf-data:/data --name idf-trains idf-trains
+```
+
+- **Mise à jour** : `git pull && docker compose up -d --build`. Les données du volume sont conservées et le schéma de la
+  base est migré automatiquement.
+- Derrière un reverse proxy (HTTPS), les en-têtes `X-Forwarded-*` sont pris en compte.
+
+Testé avec Podman 5 (`podman build`, `podman compose`), compatible Docker.
+
 ## Frontend (Svelte)
 
 Interface web dans `frontend/` (Svelte 5 + Vite + TypeScript) : recherche de gare tolérante aux fautes,
@@ -29,7 +60,7 @@ Pages :
 - `#/` : **accueil personnalisable** : les trajets et itinéraires sauvegardés choisis (bouton « Personnaliser » : cocher, ordonner), avec les prochains trains directs en direct et le meilleur itinéraire calculé à l'ouverture ;
 - `#/departs` : recherche d'une gare et prochains départs ;
 - `#/itineraire` : itinéraire entre deux adresses (autocomplétion, adresses récentes, « Ma position », partir/arriver à, sauvegarde) ;
-- `#/itineraires/{id}` : itinéraire sauvegardé (calcul à la demande, renommer, supprimer, itinéraire retour) ;
+- `#/itineraires/{id}` : itinéraire sauvegardé, calculé avec son horaire enregistré (« Enregistrer cet horaire » si on le change, « Modifier » pour changer lieux/nom/horaire, renommer, supprimer, itinéraire retour) ;
 - `#/trajet?from=…&to=…` : choix d'une gare de départ et d'arrivée, prochains trains directs, sauvegarde ;
 - `#/conso` : consommation des API IDFM (quotas, historique, cache, derniers appels) ;
 - `#/trajets` : itinéraires et trajets directs sauvegardés (avec le prochain train pour les trajets directs) ;
@@ -67,9 +98,9 @@ uv run uvicorn idf_trains.main:app            # -> http://localhost:8000
 | GET | `/places?q=12 rue de rivoli` | Recherche d'adresse, arrêt, lieu ou commune (calculateur IDFM) |
 | GET | `/itineraries?from=…&to=…` | Itinéraire entre deux lieux (tous modes IDFM) |
 | GET | `/itineraries/saved` | Itinéraires sauvegardés |
-| POST | `/itineraries/saved` | Sauvegarder `{"origin": <lieu>, "destination": <lieu>, "name"?}` |
-| GET / PATCH / DELETE | `/itineraries/saved/{id}` | Détail / renommer `{"name"}` / supprimer |
-| GET | `/itineraries/saved/{id}/next` | Calculer un itinéraire sauvegardé (`datetime`, `represents`, `count`) |
+| POST | `/itineraries/saved` | Sauvegarder `{"origin": <lieu>, "destination": <lieu>, "name"?, "schedule"?}` |
+| GET / PATCH / DELETE | `/itineraries/saved/{id}` | Détail / modifier (partiel : `name`, `origin`, `destination`, `schedule`) / supprimer |
+| GET | `/itineraries/saved/{id}/next` | Calculer un itinéraire sauvegardé (son horaire enregistré par défaut) |
 | GET | `/usage?days=30` | Consommation des API IDFM : appels, quotas, cache, erreurs |
 | GET | `/home` | Éléments de la page d'accueil (trajets et itinéraires choisis, dans l'ordre) |
 | PUT | `/home` | Choisir les éléments de l'accueil `{"items": [{"kind": "journey" \| "itinerary", "id"}]}` |
@@ -165,7 +196,12 @@ Chaque itinéraire donne les horaires, la durée, le nombre de correspondances, 
 étapes : marche, attente, correspondance et trajets en transport (ligne avec sa couleur officielle, direction,
 arrêts desservis, retard temps réel, tracé GeoJSON).
 
-**Itinéraires sauvegardés** : `POST /itineraries/saved` prend les lieux tels que renvoyés par `/places`. Ils sont
+**Itinéraires sauvegardés** : `POST /itineraries/saved` prend les lieux tels que renvoyés par `/places`, et un horaire
+par défaut facultatif : `"schedule": {"mode": "now" | "departure" | "arrival", "date": "AAAA-MM-JJ" | null, "time": "HH:MM" | null}`
+(mêmes règles que `/itineraries` : sans date, aujourd'hui, ou demain si l'heure est passée). `PATCH` ne modifie que
+les champs envoyés : changer l'horaire ou les lieux d'un itinéraire existant ne crée pas de doublon. Un 409 n'est
+renvoyé que si **un autre** itinéraire relie déjà ces deux lieux. `/itineraries/saved/{id}/next` applique l'horaire
+enregistré, sauf si la requête précise `date`, `time` ou `datetime`. Les bases existantes sont migrées automatiquement. Ils sont
 stockés en entier (nom, type, coordonnées) dans la base SQLite. Un même couple départ/arrivée n'est sauvegardé qu'une
 fois (409). « Ma position » (type `position`) est refusée (422), car elle change à chaque utilisation.
 

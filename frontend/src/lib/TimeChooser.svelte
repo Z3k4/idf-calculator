@@ -9,6 +9,20 @@
 
   export const emptyTime = (): TimeValue => ({ date: '', time: '' });
 
+  type Schedule = { mode: TimeMode; date: string | null; time: string | null };
+
+  /** Horaire enregistré -> état du sélecteur. */
+  export const fromSchedule = (s: Schedule): { mode: TimeMode; value: TimeValue } => ({
+    mode: s.mode,
+    value: { date: s.date ?? '', time: s.time ?? '' },
+  });
+
+  /** État du sélecteur -> horaire à enregistrer. */
+  export const toSchedule = (mode: TimeMode, value: TimeValue): Schedule =>
+    mode === 'now' ? { mode, date: null, time: null } : { mode, date: value.date || null, time: value.time || null };
+
+  export const sameSchedule = (a: Schedule, b: Schedule) => a.mode === b.mode && a.date === b.date && a.time === b.time;
+
   /** Lit les paramètres d'URL (`date`, `time`, ou l'ancien `when` = AAAA-MM-JJTHH:MM). */
   export function timeFromParams(params: URLSearchParams): TimeValue {
     const legacy = params.get('when');

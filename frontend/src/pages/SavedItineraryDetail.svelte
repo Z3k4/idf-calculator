@@ -1,8 +1,21 @@
 <script lang="ts">
-  import { deleteSavedItinerary, getSavedItinerary, renameSavedItinerary, type SavedItinerary } from '../lib/api';
+  import {
+    deleteSavedItinerary,
+    getSavedItinerary,
+    renameSavedItinerary,
+    updateSavedItinerary,
+    type SavedItinerary,
+  } from '../lib/api';
   import { journeyTitle } from '../lib/format';
   import ItineraryResults from '../lib/ItineraryResults.svelte';
-  import TimeChooser, { emptyTime, type TimeMode, type TimeValue } from '../lib/TimeChooser.svelte';
+  import TimeChooser, {
+    emptyTime,
+    fromSchedule,
+    sameSchedule,
+    toSchedule,
+    type TimeMode,
+    type TimeValue,
+  } from '../lib/TimeChooser.svelte';
 
   let { id }: { id: number } = $props();
 
@@ -12,13 +25,19 @@
   let time = $state<TimeValue>(emptyTime());
   let editing = $state(false);
   let draftName = $state('');
+  let savingSchedule = $state(false);
+  let scheduleSaved = $state(false);
 
   $effect(() => {
     const iid = id;
     itinerary = null;
     notFound = false;
     getSavedItinerary(iid)
-      .then((it) => (itinerary = it))
+      .then((it) => {
+        // Horaire enregistré appliqué avant l'affichage du sélecteur
+        ({ mode, value: time } = fromSchedule(it.schedule));
+        itinerary = it;
+      })
       .catch(() => (notFound = true));
   });
 
@@ -26,10 +45,42 @@
     if (itinerary) document.title = `${journeyTitle(itinerary)} · Itinéraire`;
   });
 
-  // Lien vers la page Itinéraire avec ce trajet pré-rempli (pour le modifier ou l'inverser)
+  // L'horaire affiché diffère-t-il de celui enregistré ?
+  const scheduleChanged = $derived(!!itinerary && !sameSchedule(toSchedule(mode, time), itinerary.schedule));
+
+  $effect(() => {
+    // Masquer la confirmation dès qu'on retouche l'horaire
+    mode;
+    time;
+    scheduleSaved = false;
+  });
+
+  async function saveSchedule() {
+    savingSchedule = true;
+    try {
+      itinerary = await updateSavedItinerary(id, { schedule: toSchedule(mode, time) });
+      scheduleSaved = true;
+    } finally {
+      savingSchedule = false;
+    }
+  }
+
+  /**
+   * Lien vers la page Itinéraire pré-remplie : en modification (edit=…, « Mettre à jour »)
+   * ou pour créer l'itinéraire retour.
+   */
   function plannerLink(it: SavedItinerary, reverse = false) {
     const [o, d] = reverse ? [it.destination, it.origin] : [it.origin, it.destination];
     const p = new URLSearchParams({ from: o.id, fromName: o.name, to: d.id, toName: d.name });
+    if (!reverse) {
+      p.set('edit', String(it.id));
+      const schedule = toSchedule(mode, time);
+      if (schedule.mode !== 'now') {
+        p.set('mode', schedule.mode);
+        if (schedule.date) p.set('date', schedule.date);
+        if (schedule.time) p.set('time', schedule.time);
+      }
+    }
     return `#/itineraire?${p}`;
   }
 
@@ -72,6 +123,16 @@
       <li><span class="dot end"></span><strong>{itinerary.destination.name}</strong></li>
     </ol>
     <TimeChooser bind:mode bind:value={time} />
+    {#if scheduleChanged}
+      <div class="schedule-bar">
+        <span>Horaire modifié</span>
+        <button onclick={saveSchedule} disabled={savingSchedule}>
+          {savingSchedule ? 'Enregistrement…' : 'Enregistrer cet horaire'}
+        </button>
+      </div>
+    {:else if scheduleSaved}
+      <p class="saved">✓ Horaire enregistré</p>
+    {/if}
   </section>
 
   <ItineraryResults from={itinerary.origin.id} to={itinerary.destination.id} {mode} {time} />
@@ -167,6 +228,24 @@
   }
   .danger {
     color: var(--danger);
+  }
+  .schedule-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding: 0.6rem 0.75rem;
+    border-radius: 10px;
+    background: var(--accent-soft);
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+  .saved {
+    margin: 0;
+    color: var(--ok);
+    font-weight: 600;
+    font-size: 0.9rem;
   }
   .actions {
     display: flex;
